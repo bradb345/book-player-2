@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { View, Text, StyleSheet, Pressable, StatusBar } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
 
 export default function HomeScreen() {
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
   const insets = useSafeAreaInsets();
+  const router = useRouter();
 
   const toggleViewMode = () => {
     setViewMode((prev) => (prev === "list" ? "grid" : "list"));
@@ -31,7 +33,11 @@ export default function HomeScreen() {
               color={colors.white}
             />
           </Pressable>
-          <Pressable style={styles.iconButton} hitSlop={8}>
+          <Pressable
+            style={styles.iconButton}
+            onPress={() => router.push("/select-folder")}
+            hitSlop={8}
+          >
             <Ionicons name="folder-outline" size={24} color={colors.white} />
           </Pressable>
           <Pressable style={styles.iconButton} hitSlop={8}>
@@ -49,7 +55,10 @@ export default function HomeScreen() {
       </View>
 
       {/* Add Folder Button */}
-      <Pressable style={styles.addButton}>
+      <Pressable
+        style={styles.addButton}
+        onPress={() => router.push("/select-folder")}
+      >
         <Ionicons name="add" size={32} color={colors.white} />
       </Pressable>
     </View>
