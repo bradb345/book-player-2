@@ -1,11 +1,14 @@
 import { Stack } from "expo-router";
+import { AudioProvider } from "@/services/audioContext";
 
 export default function RootLayout() {
   return (
-    <Stack
-      screenOptions={{
-        headerShown: false,
-      }}
-    />
+    <AudioProvider>
+      <Stack
+        screenOptions={{
+          headerShown: false,
+        }}
+      />
+    </AudioProvider>
   );
 }
