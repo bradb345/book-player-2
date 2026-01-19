@@ -142,6 +142,44 @@ function sanitizeFilename(filename: string): string {
   return filename.replace(/[<>:"/\\|?*]/g, "_");
 }
 
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+async function getUniqueFilename(directory: string, filename: string): Promise<string> {
+  const sanitized = sanitizeFilename(filename);
+  let destUri = `${directory}${sanitized}`;
+
+  // Check if file already exists
+  const info = await FileSystem.getInfoAsync(destUri);
+  if (!info.exists) {
+    return sanitized;
+  }
+
+  // File exists, need to find a unique name
+  const dotIndex = sanitized.lastIndexOf(".");
+  const baseName = dotIndex > 0 ? sanitized.substring(0, dotIndex) : sanitized;
+  const extension = dotIndex > 0 ? sanitized.substring(dotIndex) : "";
+
+  let counter = 1;
+  while (true) {
+    const newFilename = `${baseName}_${counter}${extension}`;
+    destUri = `${directory}${newFilename}`;
+    const checkInfo = await FileSystem.getInfoAsync(destUri);
+    if (!checkInfo.exists) {
+      return newFilename;
+    }
+    counter++;
+    // Safety limit to prevent infinite loop
+    if (counter > 1000) {
+      throw new Error(`Unable to find unique filename for ${filename}`);
+    }
+  }
+}
+
 export async function pickAudiobooksFolder(): Promise<PickResult | null> {
   try {
     if (Platform.OS === "android" && StorageAccessFramework) {
@@ -191,7 +229,7 @@ export async function scanAndImportFolder(folderUri: string): Promise<ImportResu
     }
   } catch (error) {
     console.error("Error scanning folder:", error);
-    return { success: false, booksImported: 0, message: `Error scanning folder: ${error}` };
+    return { success: false, booksImported: 0, message: `Error scanning folder: ${getErrorMessage(error)}` };
   }
 }
 
@@ -339,10 +377,31 @@ async function scanAndImportLocalFolder(folderUri: string): Promise<ImportResult
 }
 
 function getFilenameFromUri(uri: string): string {
+  // Handle empty or invalid input
+  if (!uri || typeof uri !== "string") {
+    return "";
+  }
+
   // SAF URIs have the filename after the last %2F or /
-  const decoded = decodeURIComponent(uri);
-  const parts = decoded.split(/[/]/);
-  return parts[parts.length - 1] || "";
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(uri);
+  } catch {
+    // If decoding fails, use the original URI
+    decoded = uri;
+  }
+
+  // Remove trailing slashes and split
+  const trimmed = decoded.replace(/\/+$/, "");
+  if (!trimmed) {
+    return "";
+  }
+
+  const parts = trimmed.split(/[/]/);
+  const filename = parts[parts.length - 1];
+
+  // Return empty string if filename is undefined, null, or empty
+  return filename?.trim() || "";
 }
 
 // For SAF URIs, we don't copy - just use the URI directly
@@ -357,7 +416,7 @@ async function copyFileLocal(
   filename: string
 ): Promise<string> {
   const bookDir = await createBookDirectory(bookId);
-  const safeFilename = sanitizeFilename(filename);
+  const safeFilename = await getUniqueFilename(bookDir, filename);
   const destUri = `${bookDir}${safeFilename}`;
 
   console.log(`Copying file from ${sourceUri} to ${destUri}`);
@@ -452,39 +511,6 @@ async function importSingleFileBook(file: ScannedFile, originalFolderUri: string
   }
 }
 
-async function importMultiFileBookFromSAF(folderUri: string, files: ScannedFile[]): Promise<boolean> {
-  try {
-    // Check if already imported
-    if (await bookExistsAtPath(folderUri)) {
-      console.log("Book already exists:", folderUri);
-      return false;
-    }
-
-    const sortedFiles = [...files].sort((a, b) => naturalSort(a.name, b.name));
-    const title = getBookTitleFromPath(decodeURIComponent(folderUri));
-    console.log(`Importing multi-file book: ${title} with ${sortedFiles.length} chapters`);
-
-    const bookId = await insertBook(title, folderUri);
-
-    // Copy each audio file and create chapter entries
-    for (let i = 0; i < sortedFiles.length; i++) {
-      const file = sortedFiles[i];
-      const chapterTitle = getChapterTitleFromFilename(file.name);
-
-      // Use SAF URI directly (no copying needed)
-      const localUri = getFileUriForSAF(file.uri);
-
-      await insertChapter(bookId, chapterTitle, localUri, i);
-    }
-
-    console.log(`Book imported successfully: ${title}`);
-    return true;
-  } catch (error) {
-    console.error("Error importing multi-file book:", error);
-    return false;
-  }
-}
-
 // Local file system import functions (for iOS)
 async function importBookFromLocalDirectory(directoryUri: string): Promise<boolean> {
   try {
@@ -564,7 +590,11 @@ async function importSingleFileBookLocal(file: ScannedFile, originalFolderUri: s
   }
 }
 
-// Clean up files for a deleted book
+// Clean up copied files for a deleted book (iOS only)
+// Note: This only removes files from the app's private storage.
+// Original source files are NEVER deleted - only the copies made during import.
+// On Android (SAF), files are played directly from source and not copied,
+// so this function has no effect.
 export async function deleteBookFiles(bookId: number): Promise<void> {
   try {
     const audiobooksDir = await getAudiobooksDirectory();
@@ -573,7 +603,7 @@ export async function deleteBookFiles(bookId: number): Promise<void> {
 
     if (dirInfo.exists) {
       await FileSystem.deleteAsync(bookDir, { idempotent: true });
-      console.log(`Deleted book files: ${bookDir}`);
+      console.log(`Deleted copied book files from app storage: ${bookDir}`);
     }
   } catch (error) {
     console.error("Error deleting book files:", error);

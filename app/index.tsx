@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -10,8 +10,6 @@ import {
   TextInput,
   Alert,
   Image,
-  AppState,
-  AppStateStatus,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, useFocusEffect } from "expo-router";
@@ -20,8 +18,8 @@ import { colors } from "@/constants/theme";
 import {
   getAllBooks,
   Book,
-  getProgress,
-  Progress,
+  getProgressWithCumulativePosition,
+  ProgressWithCumulative,
   deleteBook,
   updateBookTitle,
   resetBookProgress,
@@ -31,7 +29,7 @@ import { deleteBookFiles, scanAndImportFolder } from "@/services/scanner";
 import { useAudio } from "@/services/audioContext";
 
 interface BookWithProgress extends Book {
-  progress: Progress | null;
+  progress: ProgressWithCumulative | null;
 }
 
 interface BookSection {
@@ -51,7 +49,9 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { isPlaying, currentBookId, togglePlayback } = useAudio();
-  const appState = useRef(AppState.currentState);
+
+  // Use ref to break dependency chain between callbacks
+  const loadBooksRef = useRef<() => Promise<void>>(undefined);
 
   const loadBooks = useCallback(async () => {
     try {
@@ -59,7 +59,7 @@ export default function HomeScreen() {
       const allBooks = await getAllBooks();
       const booksWithProgress: BookWithProgress[] = await Promise.all(
         allBooks.map(async (book) => {
-          const progress = await getProgress(book.id);
+          const progress = await getProgressWithCumulativePosition(book.id);
           return { ...book, progress };
         })
       );
@@ -71,48 +71,47 @@ export default function HomeScreen() {
     }
   }, []);
 
+  // Keep ref in sync
+  loadBooksRef.current = loadBooks;
+
   const scanAllFolders = useCallback(async () => {
     try {
       const folderSources = await getAllFolderSources();
       let newBooksFound = false;
 
       for (const source of folderSources) {
-        const result = await scanAndImportFolder(source.uri);
-        if (result.success && result.booksImported > 0) {
-          newBooksFound = true;
+        try {
+          const result = await scanAndImportFolder(source.uri);
+          if (result.success && result.booksImported > 0) {
+            newBooksFound = true;
+          } else if (!result.success) {
+            // Log failures silently - don't interrupt user with alerts for background scans
+            console.warn(`Scan failed for "${source.name}": ${result.message}`);
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.warn(`Scan error for "${source.name}": ${errorMessage}`);
         }
       }
 
       if (newBooksFound) {
-        await loadBooks();
+        await loadBooksRef.current?.();
       }
     } catch (error) {
       console.error("Error scanning folders:", error);
     }
-  }, [loadBooks]);
+  }, []);
 
+  // Scan for new books once when app opens
+  useEffect(() => {
+    scanAllFolders();
+  }, [scanAllFolders]);
+
+  // Load/refresh books when screen gains focus
   useFocusEffect(
     useCallback(() => {
-      loadBooks();
-      // Scan for new books when screen gains focus
-      scanAllFolders();
-    }, [loadBooks, scanAllFolders])
-  );
-
-  // Also scan when app comes to foreground
-  useFocusEffect(
-    useCallback(() => {
-      const subscription = AppState.addEventListener("change", (nextAppState: AppStateStatus) => {
-        if (appState.current.match(/inactive|background/) && nextAppState === "active") {
-          scanAllFolders();
-        }
-        appState.current = nextAppState;
-      });
-
-      return () => {
-        subscription.remove();
-      };
-    }, [scanAllFolders])
+      loadBooksRef.current?.();
+    }, [])
   );
 
   const sections = useMemo((): BookSection[] => {
@@ -176,17 +175,38 @@ export default function HomeScreen() {
 
       case "delete":
         Alert.alert(
-          "Delete Book",
-          `Are you sure you want to delete "${selectedBook.title}"? This will remove it from your library and delete the imported files.`,
+          "Remove Book",
+          `Are you sure you want to remove "${selectedBook.title}" from your library? Your original audio files will not be deleted.`,
           [
             { text: "Cancel", style: "cancel" },
             {
-              text: "Delete",
+              text: "Remove",
               style: "destructive",
               onPress: async () => {
-                await deleteBookFiles(selectedBook.id);
-                await deleteBook(selectedBook.id);
-                loadBooks();
+                const bookId = selectedBook.id;
+                const bookTitle = selectedBook.title;
+
+                try {
+                  // Delete from database first (critical operation)
+                  await deleteBook(bookId);
+
+                  // Then clean up copied files (non-critical, best effort)
+                  // If this fails, we have orphaned files but the book is removed from UI
+                  try {
+                    await deleteBookFiles(bookId);
+                  } catch (fileError) {
+                    console.warn("Failed to clean up book files:", fileError);
+                    // Don't alert user - the book is removed, files are just orphaned
+                  }
+
+                  loadBooks();
+                } catch (error) {
+                  const errorMessage = error instanceof Error ? error.message : String(error);
+                  Alert.alert(
+                    "Error",
+                    `Failed to remove "${bookTitle}": ${errorMessage}`
+                  );
+                }
               },
             },
           ]
@@ -210,9 +230,9 @@ export default function HomeScreen() {
 
   const renderBookItem = ({ item }: { item: BookWithProgress }) => {
     // Only calculate progress if we have valid duration data
-    const hasValidProgress = item.progress && item.progress.position_ms > 0 && item.total_duration_ms > 0;
+    const hasValidProgress = item.progress && item.progress.cumulative_position_ms > 0 && item.total_duration_ms > 0;
     const progressPercent = hasValidProgress
-      ? Math.min(100, (item.progress!.position_ms / item.total_duration_ms) * 100)
+      ? Math.min(100, (item.progress!.cumulative_position_ms / item.total_duration_ms) * 100)
       : 0;
 
     return (
@@ -370,7 +390,7 @@ export default function HomeScreen() {
             >
               <Ionicons name="trash" size={22} color={colors.red} />
               <Text style={[styles.menuItemText, styles.menuItemTextDanger]}>
-                Delete Book
+                Remove from Library
               </Text>
             </Pressable>
 

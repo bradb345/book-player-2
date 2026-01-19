@@ -141,6 +141,45 @@ export async function getProgress(bookId: number): Promise<Progress | null> {
   );
 }
 
+export interface ProgressWithCumulative extends Progress {
+  cumulative_position_ms: number;
+}
+
+export async function getProgressWithCumulativePosition(bookId: number): Promise<ProgressWithCumulative | null> {
+  const database = await getDatabase();
+
+  const progress = await database.getFirstAsync<Progress>(
+    `SELECT * FROM progress WHERE book_id = ?`,
+    [bookId]
+  );
+
+  if (!progress) return null;
+
+  // Get the position (order) of the current chapter
+  const currentChapter = await database.getFirstAsync<{ position: number }>(
+    `SELECT position FROM chapters WHERE id = ?`,
+    [progress.current_chapter_id]
+  );
+
+  if (!currentChapter) {
+    // Chapter not found, return progress with just current position
+    return { ...progress, cumulative_position_ms: progress.position_ms };
+  }
+
+  // Sum durations of all chapters before the current one
+  const result = await database.getFirstAsync<{ total_ms: number }>(
+    `SELECT COALESCE(SUM(duration_ms), 0) as total_ms
+     FROM chapters
+     WHERE book_id = ? AND position < ?`,
+    [bookId, currentChapter.position]
+  );
+
+  const previousChaptersDuration = result?.total_ms ?? 0;
+  const cumulativePosition = previousChaptersDuration + progress.position_ms;
+
+  return { ...progress, cumulative_position_ms: cumulativePosition };
+}
+
 export async function updateProgress(
   bookId: number,
   currentChapterId: number,

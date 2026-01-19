@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   View,
   Text,
@@ -30,9 +30,17 @@ export default function SelectFolderScreen() {
   const [status, setStatus] = useState<string | null>(null);
   const [folderSources, setFolderSources] = useState<FolderSource[]>([]);
 
+  // Request ID to prevent stale responses from out-of-order async operations
+  const loadRequestIdRef = useRef(0);
+
   const loadFolderSources = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
     const sources = await getAllFolderSources();
-    setFolderSources(sources);
+
+    // Only update state if this is still the latest request
+    if (requestId === loadRequestIdRef.current) {
+      setFolderSources(sources);
+    }
   }, []);
 
   useEffect(() => {

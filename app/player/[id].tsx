@@ -52,6 +52,13 @@ export default function PlayerScreen() {
   const soundRef = useRef<Audio.Sound | null>(null);
   const chapterDurationsRef = useRef<Map<number, number>>(new Map());
 
+  // Refs to avoid stale closures in callbacks
+  const bookRef = useRef<Book | null>(null);
+  const chaptersRef = useRef<Chapter[]>([]);
+  const currentChapterIndexRef = useRef(0);
+  const isPlayingRef = useRef(false);
+  const positionMsRef = useRef(0);
+
   // Load book data
   useEffect(() => {
     const loadBook = async () => {
@@ -103,48 +110,71 @@ export default function PlayerScreen() {
     setPlaybackState(isPlaying, bookId);
   }, [isPlaying, book, setPlaybackState]);
 
-  const onPlaybackStatusUpdate = useCallback(
-    (status: AVPlaybackStatus) => {
-      if (!status.isLoaded) {
-        if (status.error) {
-          console.error("Playback error:", status.error);
-          setError(`Playback error: ${status.error}`);
-        }
-        return;
+  // Keep refs in sync with state to avoid stale closures in audio callback
+  useEffect(() => {
+    bookRef.current = book;
+  }, [book]);
+
+  useEffect(() => {
+    chaptersRef.current = chapters;
+  }, [chapters]);
+
+  useEffect(() => {
+    currentChapterIndexRef.current = currentChapterIndex;
+  }, [currentChapterIndex]);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    positionMsRef.current = positionMs;
+  }, [positionMs]);
+
+  // Use refs in callback to always access latest values
+  const onPlaybackStatusUpdate = useCallback((status: AVPlaybackStatus) => {
+    if (!status.isLoaded) {
+      if (status.error) {
+        console.error("Playback error:", status.error);
+        setError(`Playback error: ${status.error}`);
       }
+      return;
+    }
 
-      setPositionMs(status.positionMillis);
-      setDurationMs(status.durationMillis || 0);
-      setIsPlaying(status.isPlaying);
+    setPositionMs(status.positionMillis);
+    setDurationMs(status.durationMillis || 0);
+    setIsPlaying(status.isPlaying);
 
-      // Track chapter duration and update book total duration
-      if (status.durationMillis && status.durationMillis > 0 && chapters[currentChapterIndex]) {
-        const chapterId = chapters[currentChapterIndex].id;
-        if (!chapterDurationsRef.current.has(chapterId)) {
-          chapterDurationsRef.current.set(chapterId, status.durationMillis);
+    const currentBook = bookRef.current;
+    const currentChapters = chaptersRef.current;
+    const chapterIndex = currentChapterIndexRef.current;
 
-          // Calculate and update total duration from known chapters
-          if (book) {
-            let totalDuration = 0;
-            chapterDurationsRef.current.forEach((duration) => {
-              totalDuration += duration;
-            });
-            // For single-chapter books or as we discover more chapters
-            updateBookDuration(book.id, totalDuration);
-          }
+    // Track chapter duration
+    if (status.durationMillis && status.durationMillis > 0 && currentChapters[chapterIndex]) {
+      const chapterId = currentChapters[chapterIndex].id;
+      if (!chapterDurationsRef.current.has(chapterId)) {
+        chapterDurationsRef.current.set(chapterId, status.durationMillis);
+
+        // Only update database when all chapter durations are known
+        // This avoids multiple writes as user plays through chapters
+        if (currentBook && chapterDurationsRef.current.size === currentChapters.length) {
+          let totalDuration = 0;
+          chapterDurationsRef.current.forEach((duration) => {
+            totalDuration += duration;
+          });
+          updateBookDuration(currentBook.id, totalDuration);
         }
       }
+    }
 
-      // Auto-advance to next chapter
-      if (status.didJustFinish && !status.isLooping) {
-        if (currentChapterIndex < chapters.length - 1) {
-          initialPositionRef.current = 0;
-          setCurrentChapterIndex((prev) => prev + 1);
-        }
+    // Auto-advance to next chapter
+    if (status.didJustFinish && !status.isLooping) {
+      if (chapterIndex < currentChapters.length - 1) {
+        initialPositionRef.current = 0;
+        setCurrentChapterIndex((prev) => prev + 1);
       }
-    },
-    [currentChapterIndex, chapters, book]
-  );
+    }
+  }, []);
 
   // Load audio when chapter changes
   useEffect(() => {
@@ -159,7 +189,8 @@ export default function PlayerScreen() {
         try {
           await soundRef.current.unloadAsync();
         } catch (e) {
-          // Ignore unload errors
+          // Log but don't block on unload errors (e.g., already unloaded)
+          console.warn("Error unloading previous audio:", e);
         }
         soundRef.current = null;
         setSound(null);
@@ -203,7 +234,10 @@ export default function PlayerScreen() {
 
     return () => {
       if (soundRef.current) {
-        soundRef.current.unloadAsync();
+        // Fire-and-forget with error handling to avoid unhandled promise rejection
+        soundRef.current.unloadAsync().catch((e) => {
+          console.warn("Error unloading audio during cleanup:", e);
+        });
         soundRef.current = null;
       }
     };
@@ -211,12 +245,41 @@ export default function PlayerScreen() {
 
   // Update playback speed when it changes
   useEffect(() => {
-    if (sound) {
-      sound.setRateAsync(playbackSpeed, true);
-    }
+    if (!sound) return;
+
+    const updateRate = async () => {
+      try {
+        await sound.setRateAsync(playbackSpeed, true);
+      } catch (e) {
+        console.error("Error setting playback rate:", e);
+        // Query current status to get actual rate and revert UI
+        try {
+          const status = await sound.getStatusAsync();
+          if (status.isLoaded && status.rate !== playbackSpeed) {
+            setPlaybackSpeed(status.rate);
+            Alert.alert(
+              "Speed Change Failed",
+              "This audio format may not support the selected playback speed."
+            );
+          }
+        } catch {
+          // If we can't get status, just reset to 1.0x
+          setPlaybackSpeed(1.0);
+        }
+      }
+    };
+
+    updateRate();
   }, [playbackSpeed, sound]);
 
-  // Save progress periodically (save chapter position, not cumulative)
+  // Progress Saving Strategy:
+  // - Saves current chapter ID + position within that chapter (not cumulative book position)
+  // - Periodic save: every 5 seconds during playback
+  // - Immediate save: when user seeks to a new position
+  // - Final save: when component unmounts (using refs for latest values)
+  // The home screen calculates cumulative progress from chapter durations when displaying.
+
+  // Periodic progress save
   useEffect(() => {
     if (!book || chapters.length === 0) return;
 
@@ -231,33 +294,52 @@ export default function PlayerScreen() {
     return () => clearInterval(interval);
   }, [book, chapters, currentChapterIndex, positionMs]);
 
-  // Save progress on unmount (save chapter position, not cumulative)
+  // Save progress and duration on unmount (uses refs to capture latest values)
   useEffect(() => {
     return () => {
-      if (book && chapters.length > 0 && positionMs > 0) {
-        const chapter = chapters[currentChapterIndex];
-        if (chapter) {
-          updateProgress(book.id, chapter.id, positionMs);
+      const currentBook = bookRef.current;
+      const currentChapters = chaptersRef.current;
+      const chapterIndex = currentChapterIndexRef.current;
+      const position = positionMsRef.current;
+
+      if (currentBook && currentChapters.length > 0) {
+        // Save playback position
+        if (position > 0) {
+          const chapter = currentChapters[chapterIndex];
+          if (chapter) {
+            updateProgress(currentBook.id, chapter.id, position);
+          }
+        }
+
+        // Save discovered chapter durations if we have any
+        if (chapterDurationsRef.current.size > 0) {
+          let totalDuration = 0;
+          chapterDurationsRef.current.forEach((duration) => {
+            totalDuration += duration;
+          });
+          updateBookDuration(currentBook.id, totalDuration);
         }
       }
     };
-  }, [book, chapters, currentChapterIndex, positionMs]);
+  }, []);
 
+  // Use refs for stable callback that doesn't change on every render
   const handlePlayPause = useCallback(async () => {
-    if (!sound) return;
+    const currentSound = soundRef.current;
+    if (!currentSound) return;
 
     try {
-      if (isPlaying) {
-        await sound.pauseAsync();
+      if (isPlayingRef.current) {
+        await currentSound.pauseAsync();
       } else {
-        await sound.playAsync();
+        await currentSound.playAsync();
       }
     } catch (e) {
       console.error("Error toggling playback:", e);
     }
-  }, [sound, isPlaying]);
+  }, []);
 
-  // Register toggle callback for global control
+  // Register toggle callback for global control (stable, only runs once)
   useEffect(() => {
     registerToggleCallback(handlePlayPause);
     return () => {
@@ -308,7 +390,7 @@ export default function PlayerScreen() {
       const newPosition = Math.floor(value * durationMs);
       await sound.setPositionAsync(newPosition);
 
-      // Save progress immediately after seeking (save chapter position, not cumulative)
+      // Immediate save on seek (see Progress Saving Strategy above)
       const chapter = chapters[currentChapterIndex];
       if (chapter) {
         await updateProgress(book.id, chapter.id, newPosition);
