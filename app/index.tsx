@@ -48,7 +48,9 @@ export default function HomeScreen() {
   const [editTitle, setEditTitle] = useState("");
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { isPlaying, currentBookId, togglePlayback } = useAudio();
+  const { state: audioState, togglePlayback } = useAudio();
+  const { isPlaying, book: currentBook } = audioState;
+  const currentBookId = currentBook?.id ?? null;
 
   // Use ref to break dependency chain between callbacks
   const loadBooksRef = useRef<() => Promise<void>>(undefined);
