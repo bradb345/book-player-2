@@ -24,6 +24,7 @@ import {
   updateBookTitle,
   resetBookProgress,
   getAllFolderSources,
+  markBookHistoryDeleted,
 } from "@/services/database";
 import { deleteBookFiles, scanAndImportFolder } from "@/services/scanner";
 import { useAudio } from "@/services/audioContext";
@@ -189,7 +190,9 @@ export default function HomeScreen() {
                 const bookTitle = selectedBook.title;
 
                 try {
-                  // Delete from database first (critical operation)
+                  // Preserve analytics history before deletion
+                  await markBookHistoryDeleted(bookId);
+                  // Delete from database (critical operation)
                   await deleteBook(bookId);
 
                   // Then clean up copied files (non-critical, best effort)
@@ -303,6 +306,13 @@ export default function HomeScreen() {
       <View style={[styles.header, { paddingTop: insets.top + 5 }]}>
         <Text style={styles.headerTitle}>Audiobooks</Text>
         <View style={styles.headerIcons}>
+          <Pressable
+            style={styles.iconButton}
+            onPress={() => router.push("/analytics")}
+            hitSlop={8}
+          >
+            <Ionicons name="stats-chart" size={22} color={colors.white} />
+          </Pressable>
           <Pressable
             style={styles.iconButton}
             onPress={() => router.push("/select-folder")}

@@ -15,6 +15,7 @@ import { Ionicons } from "@expo/vector-icons";
 import Slider from "@react-native-community/slider";
 import { colors } from "@/constants/theme";
 import { useAudio } from "@/services/audioContext";
+import { getBookHistoryByBookId } from "@/services/database";
 
 const SKIP_SECONDS = 30;
 const MIN_SPEED = 0.5;
@@ -124,7 +125,21 @@ export default function PlayerScreen() {
         <View style={styles.headerCenter}>
           <Text style={styles.headerSubtitle}>NOW PLAYING</Text>
         </View>
-        <View style={styles.headerSpacer} />
+        <Pressable
+          style={styles.analyticsButton}
+          onPress={async () => {
+            if (!book) return;
+            const history = await getBookHistoryByBookId(book.id);
+            if (history) {
+              router.push(`/analytics/${history.id}`);
+            } else {
+              router.push("/analytics");
+            }
+          }}
+          hitSlop={8}
+        >
+          <Ionicons name="stats-chart" size={22} color={colors.white} />
+        </Pressable>
       </View>
 
       {/* Book Cover */}
@@ -328,8 +343,10 @@ const styles = StyleSheet.create({
     color: colors.lightGrey,
     letterSpacing: 1,
   },
-  headerSpacer: {
+  analyticsButton: {
+    padding: 4,
     width: 36,
+    alignItems: "center",
   },
   coverContainer: {
     flex: 1,

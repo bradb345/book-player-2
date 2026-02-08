@@ -3,10 +3,15 @@ import { Audio, AVPlaybackStatus } from "expo-av";
 import {
   Book,
   Chapter,
+  BookHistory,
   getBookWithChapters,
   getProgress,
   updateProgress,
   updateBookDuration,
+  getOrCreateBookHistory,
+  markBookHistoryCompleted,
+  updateBookHistoryDuration,
+  upsertListeningSession,
 } from "./database";
 
 interface AudioState {
@@ -57,6 +62,9 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   const soundRef = useRef<Audio.Sound | null>(null);
   const chapterDurationsRef = useRef<Map<number, number>>(new Map());
   const isTransitioningRef = useRef(false);
+  const bookHistoryRef = useRef<BookHistory | null>(null);
+  const accumulatedListeningMsRef = useRef(0);
+  const lastProgressTimestampRef = useRef<number | null>(null);
 
   // Refs for callbacks to avoid stale closures
   const stateRef = useRef(state);
@@ -80,12 +88,35 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     configureAudio();
   }, []);
 
-  // Progress saving interval
+  // Progress saving interval + listening time tracking
   useEffect(() => {
     const saveProgress = async () => {
       if (isTransitioningRef.current) return;
       const { book, chapters, currentChapterIndex, positionMs, isPlaying } = stateRef.current;
       if (!book || chapters.length === 0 || positionMs === 0) return;
+
+      const now = Date.now();
+
+      // Track listening time when playing
+      if (isPlaying && lastProgressTimestampRef.current !== null) {
+        const elapsed = now - lastProgressTimestampRef.current;
+        // Clamp to 10s max to handle backgrounding/sleep
+        const clamped = Math.min(elapsed, 10000);
+        accumulatedListeningMsRef.current += clamped;
+      }
+      lastProgressTimestampRef.current = isPlaying ? now : null;
+
+      // Flush accumulated listening time
+      if (accumulatedListeningMsRef.current > 0 && bookHistoryRef.current) {
+        const toFlush = accumulatedListeningMsRef.current;
+        accumulatedListeningMsRef.current = 0;
+        try {
+          await upsertListeningSession(bookHistoryRef.current.id, toFlush);
+        } catch (e) {
+          console.warn("Error saving listening session:", e);
+        }
+      }
+
       // Only save if we have a valid chapter and position
       const chapter = chapters[currentChapterIndex];
       if (chapter && (isPlaying || positionMs > 0)) {
@@ -136,11 +167,17 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
             totalDuration += duration;
           });
           updateBookDuration(currentState.book.id, totalDuration);
+          // Also sync to book_history
+          if (bookHistoryRef.current) {
+            updateBookHistoryDuration(bookHistoryRef.current.id, totalDuration).catch((e) =>
+              console.warn("Error updating book history duration:", e)
+            );
+          }
         }
       }
     }
 
-    // Auto-advance to next chapter
+    // Auto-advance to next chapter or mark complete
     if (status.didJustFinish && !status.isLooping) {
       const { chapters, currentChapterIndex } = currentState;
       if (currentChapterIndex < chapters.length - 1) {
@@ -148,6 +185,11 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         setTimeout(() => {
           goToChapter(currentChapterIndex + 1, 0);
         }, 0);
+      } else if (bookHistoryRef.current) {
+        // Last chapter finished — mark book as completed
+        markBookHistoryCompleted(bookHistoryRef.current.id).catch((e) =>
+          console.warn("Error marking book completed:", e)
+        );
       }
     }
   }, []);
@@ -254,6 +296,16 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
 
     // Clear chapter durations for the new book
     chapterDurationsRef.current.clear();
+
+    // Initialize book history for analytics
+    try {
+      bookHistoryRef.current = await getOrCreateBookHistory(bookId);
+    } catch (e) {
+      console.warn("Error creating book history:", e);
+      bookHistoryRef.current = null;
+    }
+    accumulatedListeningMsRef.current = 0;
+    lastProgressTimestampRef.current = null;
 
     setState(prev => ({
       ...prev,
@@ -419,6 +471,9 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
 
     setState(initialState);
     chapterDurationsRef.current.clear();
+    bookHistoryRef.current = null;
+    accumulatedListeningMsRef.current = 0;
+    lastProgressTimestampRef.current = null;
   }, []);
 
   return (

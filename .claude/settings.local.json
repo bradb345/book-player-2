@@ -7,7 +7,8 @@
       "WebFetch(domain:api.github.com)",
       "WebFetch(domain:docs.expo.dev)",
       "Bash(npx tsc:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "WebSearch"
     ]
   }
 }
