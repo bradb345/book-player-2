@@ -56,6 +56,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AudioState>(initialState);
   const soundRef = useRef<Audio.Sound | null>(null);
   const chapterDurationsRef = useRef<Map<number, number>>(new Map());
+  const isTransitioningRef = useRef(false);
 
   // Refs for callbacks to avoid stale closures
   const stateRef = useRef(state);
@@ -82,12 +83,17 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   // Progress saving interval
   useEffect(() => {
     const saveProgress = async () => {
+      if (isTransitioningRef.current) return;
       const { book, chapters, currentChapterIndex, positionMs, isPlaying } = stateRef.current;
       if (!book || chapters.length === 0 || positionMs === 0) return;
       // Only save if we have a valid chapter and position
       const chapter = chapters[currentChapterIndex];
       if (chapter && (isPlaying || positionMs > 0)) {
-        await updateProgress(book.id, chapter.id, positionMs);
+        try {
+          await updateProgress(book.id, chapter.id, positionMs);
+        } catch (e) {
+          console.warn("Error saving progress:", e);
+        }
       }
     };
 
@@ -104,6 +110,9 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       }
       return;
     }
+
+    // Ignore status updates during book transitions
+    if (isTransitioningRef.current) return;
 
     const currentState = stateRef.current;
 
@@ -196,10 +205,37 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    // Block progress saves during transition
+    isTransitioningRef.current = true;
+
+    // Save progress of the current book before switching
+    const { book: prevBook, chapters: prevChapters, currentChapterIndex: prevIndex, positionMs: prevPosition } = stateRef.current;
+    if (prevBook && prevChapters.length > 0 && prevPosition > 0) {
+      const prevChapter = prevChapters[prevIndex];
+      if (prevChapter) {
+        try {
+          await updateProgress(prevBook.id, prevChapter.id, prevPosition);
+        } catch (e) {
+          console.warn("Error saving previous book progress:", e);
+        }
+      }
+    }
+
+    // Unload previous audio before changing state
+    if (soundRef.current) {
+      try {
+        await soundRef.current.unloadAsync();
+      } catch (e) {
+        console.warn("Error unloading previous audio:", e);
+      }
+      soundRef.current = null;
+    }
+
     setState(prev => ({ ...prev, isLoading: true, error: null }));
 
     const bookData = await getBookWithChapters(bookId);
     if (!bookData) {
+      isTransitioningRef.current = false;
       setState(prev => ({ ...prev, isLoading: false, error: "Book not found" }));
       return;
     }
@@ -216,6 +252,9 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
+    // Clear chapter durations for the new book
+    chapterDurationsRef.current.clear();
+
     setState(prev => ({
       ...prev,
       book: bookData.book,
@@ -225,7 +264,9 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       isLoading: false,
     }));
 
-    // Load the chapter audio
+    isTransitioningRef.current = false;
+
+    // Load the chapter audio and save initial progress
     if (bookData.chapters.length > 0) {
       await loadChapterAudio(
         bookData.chapters[chapterIndex],
@@ -233,6 +274,13 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         stateRef.current.playbackSpeed,
         false // Don't auto-play on load
       );
+
+      // Save progress immediately so the book moves to "In Progress"
+      try {
+        await updateProgress(bookData.book.id, bookData.chapters[chapterIndex].id, initialPosition);
+      } catch (e) {
+        console.warn("Error saving initial progress:", e);
+      }
     }
   }, [loadChapterAudio]);
 
