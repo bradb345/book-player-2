@@ -1,5 +1,13 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from "react";
-import { Audio, AVPlaybackStatus } from "expo-av";
+import TrackPlayer, {
+  Capability,
+  State,
+  Event,
+  useTrackPlayerEvents,
+  usePlaybackState,
+  RepeatMode,
+  Track,
+} from "react-native-track-player";
 import {
   Book,
   Chapter,
@@ -57,14 +65,51 @@ const initialState: AudioState = {
 
 const AudioContext = createContext<AudioContextType | null>(null);
 
+let isPlayerSetup = false;
+
+async function setupPlayer() {
+  if (isPlayerSetup) return;
+  try {
+    await TrackPlayer.setupPlayer({
+      autoHandleInterruptions: true,
+    });
+    await TrackPlayer.updateOptions({
+      capabilities: [
+        Capability.Play,
+        Capability.Pause,
+        Capability.SkipToNext,
+        Capability.SkipToPrevious,
+        Capability.SeekTo,
+        Capability.JumpForward,
+        Capability.JumpBackward,
+      ],
+      compactCapabilities: [
+        Capability.Play,
+        Capability.Pause,
+        Capability.SkipToNext,
+        Capability.SkipToPrevious,
+      ],
+      forwardJumpInterval: 30,
+      backwardJumpInterval: 30,
+      progressUpdateEventInterval: 1,
+    });
+    await TrackPlayer.setRepeatMode(RepeatMode.Off);
+    isPlayerSetup = true;
+  } catch (e) {
+    // Player might already be set up (e.g., after hot reload)
+    console.warn("TrackPlayer setup error (may be already initialized):", e);
+    isPlayerSetup = true;
+  }
+}
+
 export function AudioProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AudioState>(initialState);
-  const soundRef = useRef<Audio.Sound | null>(null);
   const chapterDurationsRef = useRef<Map<number, number>>(new Map());
   const isTransitioningRef = useRef(false);
   const bookHistoryRef = useRef<BookHistory | null>(null);
   const accumulatedListeningMsRef = useRef(0);
   const lastProgressTimestampRef = useRef<number | null>(null);
+  const playerReadyRef = useRef(false);
 
   // Refs for callbacks to avoid stale closures
   const stateRef = useRef(state);
@@ -72,28 +117,158 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     stateRef.current = state;
   }, [state]);
 
-  // Configure audio session on mount
+  // Setup player on mount
   useEffect(() => {
-    const configureAudio = async () => {
-      try {
-        await Audio.setAudioModeAsync({
-          playsInSilentModeIOS: true,
-          staysActiveInBackground: true,
-          shouldDuckAndroid: true,
-        });
-      } catch (e) {
-        console.error("Error configuring audio:", e);
-      }
-    };
-    configureAudio();
+    setupPlayer().then(() => {
+      playerReadyRef.current = true;
+    });
   }, []);
+
+  // Playback state tracking via hook
+  const playbackState = usePlaybackState();
+  useEffect(() => {
+    console.log('[DEBUG] playbackState:', JSON.stringify(playbackState), 'State.Playing:', State.Playing, 'State.Buffering:', State.Buffering);
+    if (isTransitioningRef.current) return;
+
+    const playing =
+      playbackState.state === State.Playing ||
+      playbackState.state === State.Buffering;
+
+    console.log('[DEBUG] computed playing:', playing);
+
+    setState((prev) => {
+      if (prev.isPlaying === playing) return prev;
+      return { ...prev, isPlaying: playing };
+    });
+  }, [playbackState.state]);
+
+  // Event: progress updates
+  useTrackPlayerEvents([Event.PlaybackProgressUpdated], (event) => {
+    if (isTransitioningRef.current) return;
+
+    const currentState = stateRef.current;
+    const positionMs = Math.round(event.position * 1000);
+    const durationMs = Math.round(event.duration * 1000);
+
+    setState((prev) => ({
+      ...prev,
+      positionMs,
+      durationMs,
+    }));
+
+    // Track chapter duration discovery
+    if (durationMs > 0 && currentState.chapters[currentState.currentChapterIndex]) {
+      const chapterId = currentState.chapters[currentState.currentChapterIndex].id;
+      if (!chapterDurationsRef.current.has(chapterId)) {
+        chapterDurationsRef.current.set(chapterId, durationMs);
+
+        // Update database when all chapter durations are known
+        if (currentState.book && chapterDurationsRef.current.size === currentState.chapters.length) {
+          let totalDuration = 0;
+          chapterDurationsRef.current.forEach((duration) => {
+            totalDuration += duration;
+          });
+          updateBookDuration(currentState.book.id, totalDuration);
+          if (bookHistoryRef.current) {
+            updateBookHistoryDuration(bookHistoryRef.current.id, totalDuration).catch((e) =>
+              console.warn("Error updating book history duration:", e)
+            );
+          }
+        }
+      }
+    }
+  });
+
+  // Event: active track changed (chapter auto-advance)
+  useTrackPlayerEvents([Event.PlaybackActiveTrackChanged], (event) => {
+    if (isTransitioningRef.current) return;
+
+    const currentState = stateRef.current;
+    if (event.index != null && event.index !== currentState.currentChapterIndex) {
+      setState((prev) => ({
+        ...prev,
+        currentChapterIndex: event.index!,
+        positionMs: 0,
+      }));
+    }
+  });
+
+  // Event: remote play/pause (notification widget, headphones, etc.)
+  useTrackPlayerEvents([Event.RemotePlay, Event.RemotePause, Event.RemoteStop,
+    Event.RemoteNext, Event.RemotePrevious, Event.RemoteJumpForward, Event.RemoteJumpBackward,
+    Event.RemoteSeek], async (event) => {
+    if (isTransitioningRef.current) return;
+
+    console.log('[AudioContext] Remote event received:', event.type);
+    switch (event.type) {
+      case Event.RemotePlay:
+        console.log('[AudioContext] Handling RemotePlay');
+        await TrackPlayer.play();
+        setState((prev) => ({ ...prev, isPlaying: true }));
+        break;
+      case Event.RemotePause:
+        console.log('[AudioContext] Handling RemotePause');
+        await TrackPlayer.pause();
+        setState((prev) => ({ ...prev, isPlaying: false }));
+        break;
+      case Event.RemoteStop:
+        await TrackPlayer.stop();
+        setState((prev) => ({ ...prev, isPlaying: false }));
+        break;
+      case Event.RemoteNext:
+        await TrackPlayer.skipToNext();
+        break;
+      case Event.RemotePrevious:
+        await TrackPlayer.skipToPrevious();
+        break;
+      case Event.RemoteJumpForward:
+        {
+          const { position } = await TrackPlayer.getProgress();
+          await TrackPlayer.seekTo(position + 30);
+        }
+        break;
+      case Event.RemoteJumpBackward:
+        {
+          const { position } = await TrackPlayer.getProgress();
+          await TrackPlayer.seekTo(Math.max(0, position - 30));
+        }
+        break;
+      case Event.RemoteSeek:
+        if ('position' in event) {
+          await TrackPlayer.seekTo((event as any).position);
+        }
+        break;
+    }
+  });
+
+  // Event: queue ended (last chapter finished)
+  useTrackPlayerEvents([Event.PlaybackQueueEnded], (event) => {
+    if (isTransitioningRef.current) return;
+
+    if (bookHistoryRef.current) {
+      markBookHistoryCompleted(bookHistoryRef.current.id).catch((e) =>
+        console.warn("Error marking book completed:", e)
+      );
+    }
+  });
 
   // Progress saving interval + listening time tracking
   useEffect(() => {
     const saveProgress = async () => {
       if (isTransitioningRef.current) return;
-      const { book, chapters, currentChapterIndex, positionMs, isPlaying } = stateRef.current;
-      if (!book || chapters.length === 0 || positionMs === 0) return;
+      const { book, chapters, currentChapterIndex, isPlaying } = stateRef.current;
+      if (!book || chapters.length === 0) return;
+
+      // Get fresh position from TrackPlayer
+      let positionMs = 0;
+      try {
+        const progress = await TrackPlayer.getProgress();
+        positionMs = Math.round(progress.position * 1000);
+      } catch {
+        return;
+      }
+
+      if (positionMs === 0) return;
 
       const now = Date.now();
 
@@ -132,153 +307,66 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(interval);
   }, []);
 
-  // Playback status update handler
-  const onPlaybackStatusUpdate = useCallback((status: AVPlaybackStatus) => {
-    if (!status.isLoaded) {
-      if (status.error) {
-        console.error("Playback error:", status.error);
-        setState(prev => ({ ...prev, error: `Playback error: ${status.error}` }));
-      }
-      return;
-    }
-
-    // Ignore status updates during book transitions
-    if (isTransitioningRef.current) return;
-
-    const currentState = stateRef.current;
-
-    setState(prev => ({
-      ...prev,
-      positionMs: status.positionMillis,
-      durationMs: status.durationMillis || 0,
-      isPlaying: status.isPlaying,
+  // Build track queue from chapters
+  const buildQueue = useCallback((chapters: Chapter[], book: Book): Track[] => {
+    return chapters.map((chapter) => ({
+      id: String(chapter.id),
+      url: chapter.file_path,
+      title: chapter.title,
+      artist: book.title,
+      album: book.author || undefined,
+      artwork: book.cover_path || undefined,
+      duration: chapter.duration_ms > 0 ? chapter.duration_ms / 1000 : undefined,
     }));
-
-    // Track chapter duration
-    if (status.durationMillis && status.durationMillis > 0 && currentState.chapters[currentState.currentChapterIndex]) {
-      const chapterId = currentState.chapters[currentState.currentChapterIndex].id;
-      if (!chapterDurationsRef.current.has(chapterId)) {
-        chapterDurationsRef.current.set(chapterId, status.durationMillis);
-
-        // Update database when all chapter durations are known
-        if (currentState.book && chapterDurationsRef.current.size === currentState.chapters.length) {
-          let totalDuration = 0;
-          chapterDurationsRef.current.forEach((duration) => {
-            totalDuration += duration;
-          });
-          updateBookDuration(currentState.book.id, totalDuration);
-          // Also sync to book_history
-          if (bookHistoryRef.current) {
-            updateBookHistoryDuration(bookHistoryRef.current.id, totalDuration).catch((e) =>
-              console.warn("Error updating book history duration:", e)
-            );
-          }
-        }
-      }
-    }
-
-    // Auto-advance to next chapter or mark complete
-    if (status.didJustFinish && !status.isLooping) {
-      const { chapters, currentChapterIndex } = currentState;
-      if (currentChapterIndex < chapters.length - 1) {
-        // Use setTimeout to avoid state update during render
-        setTimeout(() => {
-          goToChapter(currentChapterIndex + 1, 0);
-        }, 0);
-      } else if (bookHistoryRef.current) {
-        // Last chapter finished — mark book as completed
-        markBookHistoryCompleted(bookHistoryRef.current.id).catch((e) =>
-          console.warn("Error marking book completed:", e)
-        );
-      }
-    }
   }, []);
-
-  // Load audio for current chapter
-  const loadChapterAudio = useCallback(async (
-    chapter: Chapter,
-    initialPosition: number,
-    speed: number,
-    shouldAutoPlay: boolean
-  ) => {
-    // Unload previous sound
-    if (soundRef.current) {
-      try {
-        await soundRef.current.unloadAsync();
-      } catch (e) {
-        console.warn("Error unloading previous audio:", e);
-      }
-      soundRef.current = null;
-    }
-
-    setState(prev => ({ ...prev, isLoading: true, error: null }));
-
-    try {
-      console.log("Loading audio from:", chapter.file_path);
-
-      const { sound: newSound } = await Audio.Sound.createAsync(
-        { uri: chapter.file_path },
-        {
-          shouldPlay: shouldAutoPlay,
-          positionMillis: initialPosition,
-          rate: speed,
-          shouldCorrectPitch: true,
-          progressUpdateIntervalMillis: 500,
-        },
-        onPlaybackStatusUpdate
-      );
-
-      soundRef.current = newSound;
-      setState(prev => ({ ...prev, isLoading: false }));
-    } catch (e) {
-      console.error("Error loading audio:", e);
-      setState(prev => ({
-        ...prev,
-        isLoading: false,
-        error: "Unable to play this audiobook. The file may not be accessible.\n\nTry re-importing the book.",
-      }));
-    }
-  }, [onPlaybackStatusUpdate]);
 
   // Load a book
   const loadBook = useCallback(async (bookId: number) => {
     // If same book is already loaded, don't reload
-    if (stateRef.current.book?.id === bookId && soundRef.current) {
-      return;
+    if (stateRef.current.book?.id === bookId && playerReadyRef.current) {
+      // Check if there's actually a queue loaded
+      const queue = await TrackPlayer.getQueue();
+      if (queue.length > 0) return;
     }
 
     // Block progress saves during transition
     isTransitioningRef.current = true;
 
     // Save progress of the current book before switching
-    const { book: prevBook, chapters: prevChapters, currentChapterIndex: prevIndex, positionMs: prevPosition } = stateRef.current;
-    if (prevBook && prevChapters.length > 0 && prevPosition > 0) {
-      const prevChapter = prevChapters[prevIndex];
-      if (prevChapter) {
-        try {
-          await updateProgress(prevBook.id, prevChapter.id, prevPosition);
-        } catch (e) {
-          console.warn("Error saving previous book progress:", e);
+    const { book: prevBook, chapters: prevChapters, currentChapterIndex: prevIndex } = stateRef.current;
+    if (prevBook && prevChapters.length > 0) {
+      let prevPosition = 0;
+      try {
+        const progress = await TrackPlayer.getProgress();
+        prevPosition = Math.round(progress.position * 1000);
+      } catch { /* ignore */ }
+
+      if (prevPosition > 0) {
+        const prevChapter = prevChapters[prevIndex];
+        if (prevChapter) {
+          try {
+            await updateProgress(prevBook.id, prevChapter.id, prevPosition);
+          } catch (e) {
+            console.warn("Error saving previous book progress:", e);
+          }
         }
       }
     }
 
-    // Unload previous audio before changing state
-    if (soundRef.current) {
-      try {
-        await soundRef.current.unloadAsync();
-      } catch (e) {
-        console.warn("Error unloading previous audio:", e);
-      }
-      soundRef.current = null;
-    }
+    // Reset player before changing state
+    try {
+      await TrackPlayer.reset();
+    } catch { /* ignore if not initialized yet */ }
 
-    setState(prev => ({ ...prev, isLoading: true, error: null }));
+    setState((prev) => ({ ...prev, isLoading: true, error: null }));
+
+    // Ensure player is set up
+    await setupPlayer();
 
     const bookData = await getBookWithChapters(bookId);
     if (!bookData) {
       isTransitioningRef.current = false;
-      setState(prev => ({ ...prev, isLoading: false, error: "Book not found" }));
+      setState((prev) => ({ ...prev, isLoading: false, error: "Book not found" }));
       return;
     }
 
@@ -287,7 +375,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     let initialPosition = 0;
     const progress = await getProgress(bookId);
     if (progress && bookData.chapters.length > 0) {
-      const foundIndex = bookData.chapters.findIndex(c => c.id === progress.current_chapter_id);
+      const foundIndex = bookData.chapters.findIndex((c) => c.id === progress.current_chapter_id);
       if (foundIndex >= 0) {
         chapterIndex = foundIndex;
         initialPosition = progress.position_ms;
@@ -307,7 +395,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     accumulatedListeningMsRef.current = 0;
     lastProgressTimestampRef.current = null;
 
-    setState(prev => ({
+    setState((prev) => ({
       ...prev,
       book: bookData.book,
       chapters: bookData.chapters,
@@ -318,14 +406,24 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
 
     isTransitioningRef.current = false;
 
-    // Load the chapter audio and save initial progress
+    // Load the queue and seek to saved position
     if (bookData.chapters.length > 0) {
-      await loadChapterAudio(
-        bookData.chapters[chapterIndex],
-        initialPosition,
-        stateRef.current.playbackSpeed,
-        false // Don't auto-play on load
-      );
+      try {
+        const queue = buildQueue(bookData.chapters, bookData.book);
+        await TrackPlayer.setQueue(queue);
+        await TrackPlayer.skip(chapterIndex);
+        if (initialPosition > 0) {
+          await TrackPlayer.seekTo(initialPosition / 1000);
+        }
+        // Apply current playback speed
+        await TrackPlayer.setRate(stateRef.current.playbackSpeed);
+      } catch (e) {
+        console.error("Error loading audio queue:", e);
+        setState((prev) => ({
+          ...prev,
+          error: "Unable to play this audiobook. The file may not be accessible.\n\nTry re-importing the book.",
+        }));
+      }
 
       // Save progress immediately so the book moves to "In Progress"
       try {
@@ -334,36 +432,42 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         console.warn("Error saving initial progress:", e);
       }
     }
-  }, [loadChapterAudio]);
+  }, [buildQueue]);
 
   // Go to a specific chapter
   const goToChapter = useCallback(async (chapterIndex: number, startPosition: number = 0) => {
-    const { chapters, playbackSpeed, isPlaying } = stateRef.current;
+    const { chapters, isPlaying } = stateRef.current;
     if (chapterIndex < 0 || chapterIndex >= chapters.length) return;
 
-    const chapter = chapters[chapterIndex];
-    setState(prev => ({
+    setState((prev) => ({
       ...prev,
       currentChapterIndex: chapterIndex,
       positionMs: startPosition,
     }));
 
-    await loadChapterAudio(chapter, startPosition, playbackSpeed, isPlaying);
-  }, [loadChapterAudio]);
+    try {
+      await TrackPlayer.skip(chapterIndex);
+      if (startPosition > 0) {
+        await TrackPlayer.seekTo(startPosition / 1000);
+      }
+      if (isPlaying) {
+        await TrackPlayer.play();
+      }
+    } catch (e) {
+      console.error("Error going to chapter:", e);
+    }
+  }, []);
 
   // Toggle playback
   const togglePlayback = useCallback(async () => {
-    const sound = soundRef.current;
-    if (!sound) return;
-
     try {
-      const status = await sound.getStatusAsync();
-      if (status.isLoaded) {
-        if (status.isPlaying) {
-          await sound.pauseAsync();
-        } else {
-          await sound.playAsync();
-        }
+      const playerState = await TrackPlayer.getPlaybackState();
+      if (playerState.state === State.Playing) {
+        await TrackPlayer.pause();
+        setState((prev) => ({ ...prev, isPlaying: false }));
+      } else {
+        await TrackPlayer.play();
+        setState((prev) => ({ ...prev, isPlaying: true }));
       }
     } catch (e) {
       console.error("Error toggling playback:", e);
@@ -372,11 +476,9 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
 
   // Play
   const play = useCallback(async () => {
-    const sound = soundRef.current;
-    if (!sound) return;
-
     try {
-      await sound.playAsync();
+      await TrackPlayer.play();
+      setState((prev) => ({ ...prev, isPlaying: true }));
     } catch (e) {
       console.error("Error playing:", e);
     }
@@ -384,24 +486,21 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
 
   // Pause
   const pause = useCallback(async () => {
-    const sound = soundRef.current;
-    if (!sound) return;
-
     try {
-      await sound.pauseAsync();
+      await TrackPlayer.pause();
+      setState((prev) => ({ ...prev, isPlaying: false }));
     } catch (e) {
       console.error("Error pausing:", e);
     }
   }, []);
 
-  // Seek to position
+  // Seek to position (positionMs in milliseconds)
   const seekTo = useCallback(async (positionMs: number) => {
-    const sound = soundRef.current;
     const { book, chapters, currentChapterIndex } = stateRef.current;
-    if (!sound || !book) return;
+    if (!book) return;
 
     try {
-      await sound.setPositionAsync(positionMs);
+      await TrackPlayer.seekTo(positionMs / 1000);
       // Immediate save on seek
       const chapter = chapters[currentChapterIndex];
       if (chapter) {
@@ -437,13 +536,10 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
 
   // Set playback speed
   const setPlaybackSpeed = useCallback(async (speed: number) => {
-    setState(prev => ({ ...prev, playbackSpeed: speed }));
-
-    const sound = soundRef.current;
-    if (!sound) return;
+    setState((prev) => ({ ...prev, playbackSpeed: speed }));
 
     try {
-      await sound.setRateAsync(speed, true);
+      await TrackPlayer.setRate(speed);
     } catch (e) {
       console.error("Error setting playback rate:", e);
     }
@@ -452,21 +548,26 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   // Stop and unload
   const stopAndUnload = useCallback(async () => {
     // Save progress before unloading
-    const { book, chapters, currentChapterIndex, positionMs } = stateRef.current;
-    if (book && chapters.length > 0 && positionMs > 0) {
-      const chapter = chapters[currentChapterIndex];
-      if (chapter) {
-        await updateProgress(book.id, chapter.id, positionMs);
+    const { book, chapters, currentChapterIndex } = stateRef.current;
+    if (book && chapters.length > 0) {
+      let positionMs = 0;
+      try {
+        const progress = await TrackPlayer.getProgress();
+        positionMs = Math.round(progress.position * 1000);
+      } catch { /* ignore */ }
+
+      if (positionMs > 0) {
+        const chapter = chapters[currentChapterIndex];
+        if (chapter) {
+          await updateProgress(book.id, chapter.id, positionMs);
+        }
       }
     }
 
-    if (soundRef.current) {
-      try {
-        await soundRef.current.unloadAsync();
-      } catch (e) {
-        console.warn("Error unloading audio:", e);
-      }
-      soundRef.current = null;
+    try {
+      await TrackPlayer.reset();
+    } catch (e) {
+      console.warn("Error resetting player:", e);
     }
 
     setState(initialState);

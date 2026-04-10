@@ -16,7 +16,10 @@
       "Bash(ruby --version:*)",
       "Bash(brew link:*)",
       "Bash(/usr/libexec/java_home:*)",
-      "Bash(brew install:*)"
+      "Bash(brew install:*)",
+      "Bash(npx expo:*)",
+      "Read(//private/tmp/**)",
+      "Bash(jar tf:*)"
     ]
   }
 }
