@@ -19,7 +19,8 @@
       "Bash(brew install:*)",
       "Bash(npx expo:*)",
       "Read(//private/tmp/**)",
-      "Bash(jar tf:*)"
+      "Bash(jar tf:*)",
+      "Bash(npm run:*)"
     ]
   }
 }

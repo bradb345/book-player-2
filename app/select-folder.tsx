@@ -13,6 +13,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
+import { sharedStyles } from "@/constants/styles";
 import { pickAudiobooksFolder, scanAndImportFolder } from "@/services/scanner";
 import {
   getAllFolderSources,
@@ -144,7 +145,7 @@ export default function SelectFolderScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={sharedStyles.container}>
       <StatusBar barStyle="light-content" />
 
       {/* Header */}
@@ -280,10 +281,6 @@ export default function SelectFolderScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.darkGrey,
-  },
   header: {
     flexDirection: "row",
     alignItems: "center",

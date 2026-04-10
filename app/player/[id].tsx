@@ -14,8 +14,10 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from "@react-native-community/slider";
 import { colors } from "@/constants/theme";
+import { sharedStyles } from "@/constants/styles";
 import { useAudio } from "@/services/audioContext";
 import { getBookHistoryByBookId } from "@/services/database";
+import { formatPlaybackTime } from "@/utils/format";
 
 const SKIP_SECONDS = 30;
 const MIN_SPEED = 0.5;
@@ -74,23 +76,11 @@ export default function PlayerScreen() {
     await setPlaybackSpeed(speed);
   };
 
-  const formatTime = (ms: number) => {
-    const totalSeconds = Math.floor(ms / 1000);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-
-    if (hours > 0) {
-      return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
-    }
-    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
-  };
-
   const currentChapter = chapters[currentChapterIndex];
 
   if (isInitialLoading) {
     return (
-      <View style={[styles.container, styles.centered]}>
+      <View style={[sharedStyles.container, sharedStyles.centered]}>
         <StatusBar barStyle="light-content" />
         <ActivityIndicator size="large" color={colors.red} />
       </View>
@@ -99,7 +89,7 @@ export default function PlayerScreen() {
 
   if (!book) {
     return (
-      <View style={[styles.container, styles.centered]}>
+      <View style={[sharedStyles.container, sharedStyles.centered]}>
         <StatusBar barStyle="light-content" />
         <Text style={styles.errorText}>Book not found</Text>
         <Pressable style={styles.backButtonLarge} onPress={() => router.back()}>
@@ -110,7 +100,7 @@ export default function PlayerScreen() {
   }
 
   return (
-    <View style={styles.container}>
+    <View style={sharedStyles.container}>
       <StatusBar barStyle="light-content" />
 
       {/* Header */}
@@ -148,7 +138,7 @@ export default function PlayerScreen() {
           {isLoading ? (
             <ActivityIndicator size="large" color={colors.lightGrey} />
           ) : book.cover_path ? (
-            <Image source={{ uri: book.cover_path }} style={styles.coverImage} />
+            <Image source={{ uri: book.cover_path }} style={sharedStyles.coverImage} />
           ) : (
             <Ionicons name="book" size={80} color={colors.lightGrey} />
           )}
@@ -194,8 +184,8 @@ export default function PlayerScreen() {
           disabled={isLoading}
         />
         <View style={styles.timeContainer}>
-          <Text style={styles.timeText}>{formatTime(positionMs)}</Text>
-          <Text style={styles.timeText}>{formatTime(durationMs)}</Text>
+          <Text style={styles.timeText}>{formatPlaybackTime(positionMs)}</Text>
+          <Text style={styles.timeText}>{formatPlaybackTime(durationMs)}</Text>
         </View>
       </View>
 
@@ -300,14 +290,6 @@ export default function PlayerScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.darkGrey,
-  },
-  centered: {
-    justifyContent: "center",
-    alignItems: "center",
-  },
   errorText: {
     fontSize: 16,
     color: colors.lightGrey,
@@ -368,11 +350,6 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 10,
     overflow: "hidden",
-  },
-  coverImage: {
-    width: "100%",
-    height: "100%",
-    resizeMode: "cover",
   },
   infoContainer: {
     paddingHorizontal: 24,

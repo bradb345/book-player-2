@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
+import { sharedStyles } from "@/constants/styles";
 import {
   getAllBooks,
   Book,
@@ -249,7 +250,7 @@ export default function HomeScreen() {
       >
         <View style={styles.listCover}>
           {item.cover_path ? (
-            <Image source={{ uri: item.cover_path }} style={styles.coverImage} />
+            <Image source={{ uri: item.cover_path }} style={sharedStyles.coverImage} />
           ) : (
             <Ionicons name="book" size={28} color={colors.lightGrey} />
           )}
@@ -299,7 +300,7 @@ export default function HomeScreen() {
   );
 
   return (
-    <View style={styles.container}>
+    <View style={sharedStyles.container}>
       <StatusBar barStyle="light-content" />
 
       {/* Header */}
@@ -462,10 +463,6 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.darkGrey,
-  },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -539,11 +536,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     overflow: "hidden",
-  },
-  coverImage: {
-    width: "100%",
-    height: "100%",
-    resizeMode: "cover",
   },
   listInfo: {
     flex: 1,
