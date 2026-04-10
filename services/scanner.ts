@@ -276,7 +276,7 @@ async function scanAndImportSAFFolder(folderUri: string): Promise<ImportResult> 
 
   // Each loose audio file in the root is a separate single-file book
   for (const audioFile of audioFiles) {
-    const imported = await importSingleFileBook(audioFile, folderUri, rootCoverUri);
+    const imported = await importSingleFile(audioFile, folderUri, rootCoverUri, safResolver);
     if (imported) booksImported++;
   }
 
@@ -318,7 +318,7 @@ async function scanAndImportLocalFolder(folderUri: string): Promise<ImportResult
     // It's a single file, not a directory
     const filename = folderUri.split("/").pop() || "audio.mp3";
     if (isAudioFile(filename)) {
-      const imported = await importSingleFileBookLocal({ name: filename, uri: folderUri }, getParentDirectory(folderUri), null);
+      const imported = await importSingleFile({ name: filename, uri: folderUri }, getParentDirectory(folderUri), null, localResolver);
       return {
         success: imported,
         booksImported: imported ? 1 : 0,
@@ -361,7 +361,7 @@ async function scanAndImportLocalFolder(folderUri: string): Promise<ImportResult
 
   // Each loose audio file in the root is a separate single-file book
   for (const audioFile of audioFiles) {
-    const imported = await importSingleFileBookLocal(audioFile, folderUri, rootCoverUri);
+    const imported = await importSingleFile(audioFile, folderUri, rootCoverUri, localResolver);
     if (imported) booksImported++;
   }
 
@@ -430,64 +430,64 @@ async function copyFileLocal(
   return destUri;
 }
 
-async function importBookFromSAFDirectory(directoryUri: string): Promise<boolean> {
+// Resolves a source file URI to a playable URI.
+// SAF (Android): uses the content:// URI directly.
+// Local (iOS): copies the file to app storage.
+type FileResolver = (sourceUri: string, bookId: number, filename: string) => Promise<string>;
+
+const safResolver: FileResolver = async (sourceUri) => getFileUriForSAF(sourceUri);
+const localResolver: FileResolver = async (sourceUri, bookId, filename) =>
+  copyFileLocal(sourceUri, bookId, filename);
+
+async function importBookFromDirectory(
+  audioFiles: ScannedFile[],
+  imageFiles: ScannedFile[],
+  directoryUri: string,
+  titleSource: string,
+  resolveFile: FileResolver,
+): Promise<boolean> {
   try {
-    // Check if already imported
     if (await bookExistsAtPath(directoryUri)) {
       console.log("Book already exists:", directoryUri);
       return false;
     }
 
-    // Use SAF to read directory contents
-    const contentUris = await StorageAccessFramework.readDirectoryAsync(directoryUri);
-
-    const audioFiles: ScannedFile[] = [];
-    const imageFiles: ScannedFile[] = [];
-    for (const uri of contentUris) {
-      const filename = getFilenameFromUri(decodeURIComponent(uri));
-      if (isAudioFile(filename)) {
-        audioFiles.push({ name: filename, uri });
-      } else if (isImageFile(filename)) {
-        imageFiles.push({ name: filename, uri });
-      }
-    }
-
-    // Sort by filename
     audioFiles.sort((a, b) => naturalSort(a.name, b.name));
 
     if (audioFiles.length === 0) {
       return false;
     }
 
-    // Find cover image in this directory
     const coverUri = findCoverImage(imageFiles);
-
-    const title = getBookTitleFromPath(decodeURIComponent(directoryUri));
+    const title = getBookTitleFromPath(titleSource);
     console.log(`Importing book: ${title} with ${audioFiles.length} chapters`);
 
     const bookId = await insertBook(title, directoryUri, undefined, coverUri || undefined);
 
-    // Create chapter entries using SAF URIs directly
     for (let i = 0; i < audioFiles.length; i++) {
       const file = audioFiles[i];
       const chapterTitle = getChapterTitleFromFilename(file.name);
-      const localUri = getFileUriForSAF(file.uri);
+      const localUri = await resolveFile(file.uri, bookId, file.name);
       await insertChapter(bookId, chapterTitle, localUri, i);
     }
 
     console.log(`Book imported successfully: ${title}`);
     return true;
   } catch (error) {
-    console.error("Error importing book from SAF directory:", error);
+    console.error("Error importing book from directory:", error);
     return false;
   }
 }
 
-async function importSingleFileBook(file: ScannedFile, originalFolderUri: string, coverUri: string | null): Promise<boolean> {
+async function importSingleFile(
+  file: ScannedFile,
+  originalFolderUri: string,
+  coverUri: string | null,
+  resolveFile: FileResolver,
+): Promise<boolean> {
   try {
     const uniquePath = `${originalFolderUri}/${file.name}`;
 
-    // Check if already imported
     if (await bookExistsAtPath(uniquePath)) {
       console.log("Book already exists:", uniquePath);
       return false;
@@ -497,10 +497,7 @@ async function importSingleFileBook(file: ScannedFile, originalFolderUri: string
     console.log(`Importing single file book: ${title}`);
 
     const bookId = await insertBook(title, uniquePath, undefined, coverUri || undefined);
-
-    // Use SAF URI directly (no copying needed)
-    const localUri = getFileUriForSAF(file.uri);
-
+    const localUri = await resolveFile(file.uri, bookId, file.name);
     await insertChapter(bookId, title, localUri, 0);
 
     console.log(`Book imported successfully: ${title}`);
@@ -511,83 +508,40 @@ async function importSingleFileBook(file: ScannedFile, originalFolderUri: string
   }
 }
 
-// Local file system import functions (for iOS)
+async function importBookFromSAFDirectory(directoryUri: string): Promise<boolean> {
+  const contentUris = await StorageAccessFramework.readDirectoryAsync(directoryUri);
+
+  const audioFiles: ScannedFile[] = [];
+  const imageFiles: ScannedFile[] = [];
+  for (const uri of contentUris) {
+    const filename = getFilenameFromUri(decodeURIComponent(uri));
+    if (isAudioFile(filename)) {
+      audioFiles.push({ name: filename, uri });
+    } else if (isImageFile(filename)) {
+      imageFiles.push({ name: filename, uri });
+    }
+  }
+
+  return importBookFromDirectory(audioFiles, imageFiles, directoryUri, decodeURIComponent(directoryUri), safResolver);
+}
+
 async function importBookFromLocalDirectory(directoryUri: string): Promise<boolean> {
-  try {
-    // Check if already imported
-    if (await bookExistsAtPath(directoryUri)) {
-      console.log("Book already exists:", directoryUri);
-      return false;
-    }
-
-    const contents = await FileSystem.readDirectoryAsync(directoryUri);
-
-    const audioFiles = contents
-      .filter(isAudioFile)
-      .sort(naturalSort)
-      .map((name) => ({ name, uri: `${directoryUri}/${name}` }));
-
-    const imageFiles = contents
-      .filter(isImageFile)
-      .map((name) => ({ name, uri: `${directoryUri}/${name}` }));
-
-    if (audioFiles.length === 0) {
-      return false;
-    }
-
-    // Find cover image in this directory
-    const coverUri = findCoverImage(imageFiles);
-
-    const title = getBookTitleFromPath(directoryUri);
-    console.log(`Importing book: ${title} with ${audioFiles.length} chapters`);
-
-    const bookId = await insertBook(title, directoryUri, undefined, coverUri || undefined);
-
-    // Copy each audio file and create chapter entries
-    for (let i = 0; i < audioFiles.length; i++) {
-      const file = audioFiles[i];
-      const chapterTitle = getChapterTitleFromFilename(file.name);
-
-      // Copy file to app storage
-      const localUri = await copyFileLocal(file.uri, bookId, file.name);
-
-      await insertChapter(bookId, chapterTitle, localUri, i);
-    }
-
-    console.log(`Book imported successfully: ${title}`);
-    return true;
-  } catch (error) {
-    console.error("Error importing book from local directory:", error);
+  if (await bookExistsAtPath(directoryUri)) {
+    console.log("Book already exists:", directoryUri);
     return false;
   }
-}
 
-async function importSingleFileBookLocal(file: ScannedFile, originalFolderUri: string, coverUri: string | null): Promise<boolean> {
-  try {
-    const uniquePath = `${originalFolderUri}/${file.name}`;
+  const contents = await FileSystem.readDirectoryAsync(directoryUri);
 
-    // Check if already imported
-    if (await bookExistsAtPath(uniquePath)) {
-      console.log("Book already exists:", uniquePath);
-      return false;
-    }
+  const audioFiles = contents
+    .filter(isAudioFile)
+    .map((name) => ({ name, uri: `${directoryUri}/${name}` }));
 
-    const title = getChapterTitleFromFilename(file.name);
-    console.log(`Importing single file book: ${title}`);
+  const imageFiles = contents
+    .filter(isImageFile)
+    .map((name) => ({ name, uri: `${directoryUri}/${name}` }));
 
-    const bookId = await insertBook(title, uniquePath, undefined, coverUri || undefined);
-
-    // Copy file to app storage
-    const localUri = await copyFileLocal(file.uri, bookId, file.name);
-
-    await insertChapter(bookId, title, localUri, 0);
-
-    console.log(`Book imported successfully: ${title}`);
-    return true;
-  } catch (error) {
-    console.error("Error importing single file book:", error);
-    return false;
-  }
+  return importBookFromDirectory(audioFiles, imageFiles, directoryUri, directoryUri, localResolver);
 }
 
 // Clean up copied files for a deleted book (iOS only)

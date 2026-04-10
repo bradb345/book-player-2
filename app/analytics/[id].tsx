@@ -12,11 +12,13 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
+import { sharedStyles } from "@/constants/styles";
 import {
   BookHistory,
   getBookHistoryById,
   getTotalListeningTimeForBook,
 } from "@/services/database";
+import { formatDuration, formatDate, daysBetween } from "@/utils/format";
 
 export default function BookAnalyticsScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -40,30 +42,9 @@ export default function BookAnalyticsScreen() {
     }, [id])
   );
 
-  const formatDuration = (ms: number): string => {
-    const totalMinutes = Math.floor(ms / 60000);
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    if (minutes > 0) return `${minutes}m`;
-    const seconds = Math.floor(ms / 1000);
-    return `${seconds}s`;
-  };
-
-  const formatDate = (dateStr: string): string => {
-    const d = new Date(dateStr);
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-  };
-
-  const daysBetween = (start: string, end: string): number => {
-    const s = new Date(start).getTime();
-    const e = new Date(end).getTime();
-    return Math.max(1, Math.ceil((e - s) / (1000 * 60 * 60 * 24)));
-  };
-
   if (!book) {
     return (
-      <View style={[styles.container, styles.centered]}>
+      <View style={[sharedStyles.container, sharedStyles.centered]}>
         <StatusBar barStyle="light-content" />
         <Text style={styles.emptyText}>Book not found</Text>
         <Pressable style={styles.backButtonLarge} onPress={() => router.back()}>
@@ -84,16 +65,16 @@ export default function BookAnalyticsScreen() {
   })();
 
   return (
-    <View style={styles.container}>
+    <View style={sharedStyles.container}>
       <StatusBar barStyle="light-content" />
 
       {/* Header */}
-      <View style={[styles.header, { paddingTop: insets.top + 5 }]}>
-        <Pressable style={styles.backButton} onPress={() => router.back()} hitSlop={8}>
+      <View style={[sharedStyles.header, { paddingTop: insets.top + 5 }]}>
+        <Pressable style={sharedStyles.backButton} onPress={() => router.back()} hitSlop={8}>
           <Ionicons name="chevron-back" size={28} color={colors.white} />
         </Pressable>
-        <Text style={styles.headerTitle} numberOfLines={1}>{book.title}</Text>
-        <View style={styles.headerSpacer} />
+        <Text style={[sharedStyles.headerTitle, { fontSize: 18 }]} numberOfLines={1}>{book.title}</Text>
+        <View style={sharedStyles.headerSpacer} />
       </View>
 
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 24 }]}>
@@ -101,7 +82,7 @@ export default function BookAnalyticsScreen() {
         <View style={styles.bookHeader}>
           <View style={styles.coverLarge}>
             {book.cover_path ? (
-              <Image source={{ uri: book.cover_path }} style={styles.coverImage} />
+              <Image source={{ uri: book.cover_path }} style={sharedStyles.coverImage} />
             ) : (
               <Ionicons name="book" size={60} color={colors.lightGrey} />
             )}
@@ -172,14 +153,6 @@ export default function BookAnalyticsScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.darkGrey,
-  },
-  centered: {
-    justifyContent: "center",
-    alignItems: "center",
-  },
   emptyText: {
     fontSize: 16,
     color: colors.lightGrey,
@@ -195,25 +168,6 @@ const styles = StyleSheet.create({
     color: colors.white,
     fontSize: 16,
     fontWeight: "600",
-  },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-  },
-  backButton: {
-    padding: 4,
-  },
-  headerTitle: {
-    flex: 1,
-    fontSize: 18,
-    fontWeight: "bold",
-    color: colors.white,
-    textAlign: "center",
-  },
-  headerSpacer: {
-    width: 36,
   },
   content: {
     paddingHorizontal: 16,
@@ -236,11 +190,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 8,
     elevation: 6,
-  },
-  coverImage: {
-    width: "100%",
-    height: "100%",
-    resizeMode: "cover",
   },
   bookTitle: {
     fontSize: 22,
