@@ -509,39 +509,49 @@ async function importSingleFile(
 }
 
 async function importBookFromSAFDirectory(directoryUri: string): Promise<boolean> {
-  const contentUris = await StorageAccessFramework.readDirectoryAsync(directoryUri);
+  try {
+    const contentUris = await StorageAccessFramework.readDirectoryAsync(directoryUri);
 
-  const audioFiles: ScannedFile[] = [];
-  const imageFiles: ScannedFile[] = [];
-  for (const uri of contentUris) {
-    const filename = getFilenameFromUri(decodeURIComponent(uri));
-    if (isAudioFile(filename)) {
-      audioFiles.push({ name: filename, uri });
-    } else if (isImageFile(filename)) {
-      imageFiles.push({ name: filename, uri });
+    const audioFiles: ScannedFile[] = [];
+    const imageFiles: ScannedFile[] = [];
+    for (const uri of contentUris) {
+      const filename = getFilenameFromUri(uri);
+      if (isAudioFile(filename)) {
+        audioFiles.push({ name: filename, uri });
+      } else if (isImageFile(filename)) {
+        imageFiles.push({ name: filename, uri });
+      }
     }
-  }
 
-  return importBookFromDirectory(audioFiles, imageFiles, directoryUri, decodeURIComponent(directoryUri), safResolver);
+    return importBookFromDirectory(audioFiles, imageFiles, directoryUri, directoryUri, safResolver);
+  } catch (error) {
+    console.error("Error importing book from SAF directory:", error);
+    return false;
+  }
 }
 
 async function importBookFromLocalDirectory(directoryUri: string): Promise<boolean> {
-  if (await bookExistsAtPath(directoryUri)) {
-    console.log("Book already exists:", directoryUri);
+  try {
+    if (await bookExistsAtPath(directoryUri)) {
+      console.log("Book already exists:", directoryUri);
+      return false;
+    }
+
+    const contents = await FileSystem.readDirectoryAsync(directoryUri);
+
+    const audioFiles = contents
+      .filter(isAudioFile)
+      .map((name) => ({ name, uri: `${directoryUri}/${name}` }));
+
+    const imageFiles = contents
+      .filter(isImageFile)
+      .map((name) => ({ name, uri: `${directoryUri}/${name}` }));
+
+    return importBookFromDirectory(audioFiles, imageFiles, directoryUri, directoryUri, localResolver);
+  } catch (error) {
+    console.error("Error importing book from local directory:", error);
     return false;
   }
-
-  const contents = await FileSystem.readDirectoryAsync(directoryUri);
-
-  const audioFiles = contents
-    .filter(isAudioFile)
-    .map((name) => ({ name, uri: `${directoryUri}/${name}` }));
-
-  const imageFiles = contents
-    .filter(isImageFile)
-    .map((name) => ({ name, uri: `${directoryUri}/${name}` }));
-
-  return importBookFromDirectory(audioFiles, imageFiles, directoryUri, directoryUri, localResolver);
 }
 
 // Clean up copied files for a deleted book (iOS only)
