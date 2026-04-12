@@ -5,6 +5,7 @@ import TrackPlayer, {
   Event,
   useTrackPlayerEvents,
   usePlaybackState,
+  useProgress,
   RepeatMode,
   Track,
 } from "react-native-track-player";
@@ -142,19 +143,20 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     });
   }, [playbackState.state]);
 
-  // Event: progress updates
-  useTrackPlayerEvents([Event.PlaybackProgressUpdated], (event) => {
+  // Progress tracking via useProgress hook (more reliable than event-based)
+  const { position: progressPosition, duration: progressDuration } = useProgress(1000);
+
+  useEffect(() => {
     if (isTransitioningRef.current) return;
 
     const currentState = stateRef.current;
-    const positionMs = Math.round(event.position * 1000);
-    const durationMs = Math.round(event.duration * 1000);
+    const positionMs = Math.round(progressPosition * 1000);
+    const durationMs = Math.round(progressDuration * 1000);
 
-    setState((prev) => ({
-      ...prev,
-      positionMs,
-      durationMs,
-    }));
+    setState((prev) => {
+      if (prev.positionMs === positionMs && prev.durationMs === durationMs) return prev;
+      return { ...prev, positionMs, durationMs };
+    });
 
     // Track chapter duration discovery
     if (durationMs > 0 && currentState.chapters[currentState.currentChapterIndex]) {
@@ -177,7 +179,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         }
       }
     }
-  });
+  }, [progressPosition, progressDuration]);
 
   // Event: active track changed (chapter auto-advance)
   useTrackPlayerEvents([Event.PlaybackActiveTrackChanged], (event) => {
@@ -498,6 +500,9 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   const seekTo = useCallback(async (positionMs: number) => {
     const { book, chapters, currentChapterIndex } = stateRef.current;
     if (!book) return;
+
+    // Update state immediately so UI reflects the new position
+    setState((prev) => ({ ...prev, positionMs }));
 
     try {
       await TrackPlayer.seekTo(positionMs / 1000);

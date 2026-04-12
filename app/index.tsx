@@ -29,6 +29,7 @@ import {
 } from "@/services/database";
 import { deleteBookFiles, scanAndImportFolder } from "@/services/scanner";
 import { useAudio } from "@/services/audioContext";
+import { formatDuration } from "@/utils/format";
 
 interface BookWithProgress extends Book {
   progress: ProgressWithCumulative | null;
@@ -51,7 +52,7 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { state: audioState, togglePlayback } = useAudio();
-  const { isPlaying, book: currentBook } = audioState;
+  const { isPlaying, book: currentBook, positionMs: audioPositionMs, chapters: audioChapters, currentChapterIndex: audioChapterIndex } = audioState;
   const currentBookId = currentBook?.id ?? null;
 
   // Use ref to break dependency chain between callbacks
@@ -234,11 +235,30 @@ export default function HomeScreen() {
     router.push(`/player/${book.id}`);
   };
 
+  // Compute live cumulative position for the currently playing book
+  const liveCurrentBookCumulativeMs = useMemo(() => {
+    if (!currentBookId || audioChapters.length === 0) return 0;
+    let cumulative = 0;
+    for (let i = 0; i < audioChapterIndex; i++) {
+      cumulative += audioChapters[i].duration_ms || 0;
+    }
+    cumulative += audioPositionMs;
+    return cumulative;
+  }, [currentBookId, audioChapters, audioChapterIndex, audioPositionMs]);
+
   const renderBookItem = ({ item }: { item: BookWithProgress }) => {
-    // Only calculate progress if we have valid duration data
-    const hasValidProgress = item.progress && item.progress.cumulative_position_ms > 0 && item.total_duration_ms > 0;
+    // Use live position for the currently playing book
+    const isCurrentlyPlaying = item.id === currentBookId;
+    const liveCumulativeMs = isCurrentlyPlaying ? liveCurrentBookCumulativeMs : null;
+    const liveTotalMs = isCurrentlyPlaying && currentBook ? (currentBook.total_duration_ms || item.total_duration_ms) : item.total_duration_ms;
+
+    const hasValidProgress = isCurrentlyPlaying
+      ? liveCumulativeMs! > 0 && liveTotalMs > 0
+      : item.progress && item.progress.cumulative_position_ms > 0 && item.total_duration_ms > 0;
     const progressPercent = hasValidProgress
-      ? Math.min(100, (item.progress!.cumulative_position_ms / item.total_duration_ms) * 100)
+      ? isCurrentlyPlaying
+        ? Math.min(100, (liveCumulativeMs! / liveTotalMs) * 100)
+        : Math.min(100, (item.progress!.cumulative_position_ms / item.total_duration_ms) * 100)
       : 0;
 
     return (
@@ -271,11 +291,14 @@ export default function HomeScreen() {
                   style={[styles.progressFill, { width: `${progressPercent}%` }]}
                 />
               </View>
-              {hasValidProgress ? (
-                <Text style={styles.progressText}>{Math.round(progressPercent)}%</Text>
-              ) : (
-                <Text style={styles.progressText}>Started</Text>
-              )}
+              <Text style={styles.progressText}>
+                {(() => {
+                  const posMs = isCurrentlyPlaying ? liveCumulativeMs! : item.progress!.cumulative_position_ms;
+                  return liveTotalMs > 0
+                    ? `${formatDuration(posMs)} / ${formatDuration(liveTotalMs)}`
+                    : formatDuration(posMs);
+                })()}
+              </Text>
             </View>
           )}
         </View>

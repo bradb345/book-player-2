@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -53,6 +53,9 @@ export default function PlayerScreen() {
 
   const [showSpeedSlider, setShowSpeedSlider] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const isSeekingRef = useRef(false);
+  const frozenSliderValueRef = useRef(0);
+  const [seekDisplayMs, setSeekDisplayMs] = useState(0);
 
   // Load book on mount
   useEffect(() => {
@@ -66,10 +69,20 @@ export default function PlayerScreen() {
   }, [id, loadBook]);
 
   const handleSeek = async (value: number) => {
+    isSeekingRef.current = false;
     if (durationMs <= 0) return;
     const newPosition = Math.floor(value * durationMs);
     await seekTo(newPosition);
   };
+
+  // When seeking, freeze the slider value so re-renders from progress updates
+  // don't interfere with the native drag gesture. The Slider only updates its
+  // native position when the value prop actually changes.
+  const sliderValue = isSeekingRef.current
+    ? frozenSliderValueRef.current
+    : durationMs > 0
+      ? positionMs / durationMs
+      : 0;
 
   const handleSpeedChange = async (value: number) => {
     const speed = Math.round(value * 10) / 10;
@@ -176,7 +189,18 @@ export default function PlayerScreen() {
           style={styles.progressSlider}
           minimumValue={0}
           maximumValue={1}
-          value={durationMs > 0 ? positionMs / durationMs : 0}
+          value={sliderValue}
+          onSlidingStart={() => {
+            isSeekingRef.current = true;
+            const currentSliderValue = durationMs > 0 ? positionMs / durationMs : 0;
+            frozenSliderValueRef.current = currentSliderValue;
+            setSeekDisplayMs(Math.floor(currentSliderValue * durationMs));
+          }}
+          onValueChange={(value: number) => {
+            if (isSeekingRef.current) {
+              setSeekDisplayMs(Math.floor(value * durationMs));
+            }
+          }}
           onSlidingComplete={handleSeek}
           minimumTrackTintColor={colors.red}
           maximumTrackTintColor={colors.mediumGrey}
@@ -184,7 +208,9 @@ export default function PlayerScreen() {
           disabled={isLoading}
         />
         <View style={styles.timeContainer}>
-          <Text style={styles.timeText}>{formatPlaybackTime(positionMs)}</Text>
+          <Text style={styles.timeText}>
+            {formatPlaybackTime(isSeekingRef.current ? seekDisplayMs : positionMs)}
+          </Text>
           <Text style={styles.timeText}>{formatPlaybackTime(durationMs)}</Text>
         </View>
       </View>
