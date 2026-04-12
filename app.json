@@ -12,9 +12,11 @@
       "supportsTablet": true,
       "infoPlist": {
         "UIBackgroundModes": [
+          "audio",
           "audio"
         ]
-      }
+      },
+      "bundleIdentifier": "com.anonymous.bookplayer2"
     },
     "android": {
       "adaptiveIcon": {

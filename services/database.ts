@@ -67,11 +67,17 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (dbPromise) return dbPromise;
 
   dbPromise = (async () => {
-    const database = await SQLite.openDatabaseAsync("audiobooks.db");
-    await initializeDatabase(database);
-    db = database;
-    dbPromise = null;
-    return database;
+    try {
+      const database = await SQLite.openDatabaseAsync("audiobooks.db");
+      await initializeDatabase(database);
+      db = database;
+      return database;
+    } catch (error) {
+      db = null;
+      throw error;
+    } finally {
+      dbPromise = null;
+    }
   })();
 
   return dbPromise;
@@ -282,11 +288,13 @@ export async function updateProgress(
 }
 
 export async function updateChapterDuration(chapterId: number, durationMs: number): Promise<void> {
-  const database = await getDatabase();
-  await database.runAsync(
-    `UPDATE chapters SET duration_ms = ? WHERE id = ?`,
-    [durationMs, chapterId]
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(
+      `UPDATE chapters SET duration_ms = ? WHERE id = ?`,
+      [durationMs, chapterId]
+    );
+  });
 }
 
 export async function updateBookDuration(bookId: number, totalDurationMs: number): Promise<void> {
@@ -369,11 +377,10 @@ export async function getOrCreateBookHistory(bookId: number): Promise<BookHistor
   const book = await database.getFirstAsync<Book>(`SELECT * FROM books WHERE id = ?`, [bookId]);
   if (!book) throw new Error(`Book ${bookId} not found`);
 
-  const now = new Date().toISOString();
   const result = await database.runAsync(
     `INSERT INTO book_history (book_id, title, author, cover_path, total_duration_ms, started_at, is_in_library)
-     VALUES (?, ?, ?, ?, ?, ?, 1)`,
-    [book.id, book.title, book.author, book.cover_path, book.total_duration_ms, now]
+     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1)`,
+    [book.id, book.title, book.author, book.cover_path, book.total_duration_ms]
   );
 
   return {

@@ -116,13 +116,17 @@ export default function HomeScreen() {
     useCallback(() => {
       loadBooksRef.current?.();
 
+      if (!isPlaying || !currentBookId) {
+        return;
+      }
+
       // Refresh every 10s while a book is playing so progress bar stays current
       const interval = setInterval(() => {
         loadBooksRef.current?.();
       }, 10000);
 
       return () => clearInterval(interval);
-    }, [])
+    }, [isPlaying, currentBookId])
   );
 
   const sections = useMemo((): BookSection[] => {

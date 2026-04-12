@@ -162,12 +162,14 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     if (durationMs > 0 && currentState.chapters[currentState.currentChapterIndex]) {
       const chapterId = currentState.chapters[currentState.currentChapterIndex].id;
       if (!chapterDurationsRef.current.has(chapterId)) {
+        // Mark as pending immediately to prevent duplicate writes
         chapterDurationsRef.current.set(chapterId, durationMs);
 
-        // Save this chapter's duration to DB immediately
-        updateChapterDuration(chapterId, durationMs).catch((e) =>
-          console.warn("Error saving chapter duration:", e)
-        );
+        // Save this chapter's duration to DB, clear on failure so it retries
+        updateChapterDuration(chapterId, durationMs).catch((e) => {
+          chapterDurationsRef.current.delete(chapterId);
+          console.warn("Error saving chapter duration:", e);
+        });
 
         // Update book total duration with what we know so far
         if (currentState.book) {
