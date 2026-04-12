@@ -13,6 +13,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from "@react-native-community/slider";
+import TrackPlayer from "react-native-track-player";
 import { colors } from "@/constants/theme";
 import { sharedStyles } from "@/constants/styles";
 import { useAudio } from "@/services/audioContext";
@@ -53,6 +54,8 @@ export default function PlayerScreen() {
 
   const [showSpeedSlider, setShowSpeedSlider] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekValue, setSeekValue] = useState(0);
 
   // Load book on mount
   useEffect(() => {
@@ -66,9 +69,20 @@ export default function PlayerScreen() {
   }, [id, loadBook]);
 
   const handleSeek = async (value: number) => {
-    if (durationMs <= 0) return;
-    const newPosition = Math.floor(value * durationMs);
+    let dur = durationMs;
+    if (dur <= 0) {
+      try {
+        const progress = await TrackPlayer.getProgress();
+        dur = Math.round(progress.duration * 1000);
+      } catch { /* ignore */ }
+    }
+    if (dur <= 0) {
+      setIsSeeking(false);
+      return;
+    }
+    const newPosition = Math.floor(value * dur);
     await seekTo(newPosition);
+    setIsSeeking(false);
   };
 
   const handleSpeedChange = async (value: number) => {
@@ -176,7 +190,14 @@ export default function PlayerScreen() {
           style={styles.progressSlider}
           minimumValue={0}
           maximumValue={1}
-          value={durationMs > 0 ? positionMs / durationMs : 0}
+          value={isSeeking ? seekValue : (durationMs > 0 ? positionMs / durationMs : 0)}
+          onSlidingStart={(value) => {
+            setIsSeeking(true);
+            setSeekValue(value);
+          }}
+          onValueChange={(value) => {
+            if (isSeeking) setSeekValue(value);
+          }}
           onSlidingComplete={handleSeek}
           minimumTrackTintColor={colors.red}
           maximumTrackTintColor={colors.mediumGrey}
@@ -184,7 +205,9 @@ export default function PlayerScreen() {
           disabled={isLoading}
         />
         <View style={styles.timeContainer}>
-          <Text style={styles.timeText}>{formatPlaybackTime(positionMs)}</Text>
+          <Text style={styles.timeText}>
+            {formatPlaybackTime(isSeeking && durationMs > 0 ? Math.floor(seekValue * durationMs) : positionMs)}
+          </Text>
           <Text style={styles.timeText}>{formatPlaybackTime(durationMs)}</Text>
         </View>
       </View>

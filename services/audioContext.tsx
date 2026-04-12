@@ -5,6 +5,7 @@ import TrackPlayer, {
   Event,
   useTrackPlayerEvents,
   usePlaybackState,
+  useProgress,
   RepeatMode,
   Track,
 } from "react-native-track-player";
@@ -15,6 +16,7 @@ import {
   getBookWithChapters,
   getProgress,
   updateProgress,
+  updateChapterDuration,
   updateBookDuration,
   getOrCreateBookHistory,
   markBookHistoryCompleted,
@@ -142,33 +144,45 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     });
   }, [playbackState.state]);
 
-  // Event: progress updates
-  useTrackPlayerEvents([Event.PlaybackProgressUpdated], (event) => {
+  // Track progress via useProgress hook (polls TrackPlayer every 1s)
+  const progress = useProgress(1000);
+  useEffect(() => {
     if (isTransitioningRef.current) return;
 
-    const currentState = stateRef.current;
-    const positionMs = Math.round(event.position * 1000);
-    const durationMs = Math.round(event.duration * 1000);
+    const positionMs = Math.round(progress.position * 1000);
+    const durationMs = Math.round(progress.duration * 1000);
 
-    setState((prev) => ({
-      ...prev,
-      positionMs,
-      durationMs,
-    }));
+    setState((prev) => {
+      if (prev.positionMs === positionMs && prev.durationMs === durationMs) return prev;
+      return { ...prev, positionMs, durationMs };
+    });
 
     // Track chapter duration discovery
+    const currentState = stateRef.current;
     if (durationMs > 0 && currentState.chapters[currentState.currentChapterIndex]) {
       const chapterId = currentState.chapters[currentState.currentChapterIndex].id;
       if (!chapterDurationsRef.current.has(chapterId)) {
         chapterDurationsRef.current.set(chapterId, durationMs);
 
-        // Update database when all chapter durations are known
-        if (currentState.book && chapterDurationsRef.current.size === currentState.chapters.length) {
+        // Save this chapter's duration to DB immediately
+        updateChapterDuration(chapterId, durationMs).catch((e) =>
+          console.warn("Error saving chapter duration:", e)
+        );
+
+        // Update book total duration with what we know so far
+        if (currentState.book) {
           let totalDuration = 0;
           chapterDurationsRef.current.forEach((duration) => {
             totalDuration += duration;
           });
-          updateBookDuration(currentState.book.id, totalDuration);
+          for (const ch of currentState.chapters) {
+            if (!chapterDurationsRef.current.has(ch.id) && ch.duration_ms > 0) {
+              totalDuration += ch.duration_ms;
+            }
+          }
+          updateBookDuration(currentState.book.id, totalDuration).catch((e) =>
+            console.warn("Error updating book duration:", e)
+          );
           if (bookHistoryRef.current) {
             updateBookHistoryDuration(bookHistoryRef.current.id, totalDuration).catch((e) =>
               console.warn("Error updating book history duration:", e)
@@ -177,7 +191,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         }
       }
     }
-  });
+  }, [progress.position, progress.duration]);
 
   // Event: active track changed (chapter auto-advance)
   useTrackPlayerEvents([Event.PlaybackActiveTrackChanged], (event) => {
@@ -417,6 +431,17 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         }
         // Apply current playback speed
         await TrackPlayer.setRate(stateRef.current.playbackSpeed);
+
+        // Fetch initial track duration (progress events only fire while playing)
+        try {
+          const trackProgress = await TrackPlayer.getProgress();
+          if (trackProgress.duration > 0) {
+            setState((prev) => ({
+              ...prev,
+              durationMs: Math.round(trackProgress.duration * 1000),
+            }));
+          }
+        } catch { /* ignore */ }
       } catch (e) {
         console.error("Error loading audio queue:", e);
         setState((prev) => ({
@@ -499,15 +524,22 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     const { book, chapters, currentChapterIndex } = stateRef.current;
     if (!book) return;
 
+    // Update state immediately so slider reflects the new position
+    setState((prev) => ({ ...prev, positionMs }));
+
     try {
       await TrackPlayer.seekTo(positionMs / 1000);
-      // Immediate save on seek
-      const chapter = chapters[currentChapterIndex];
-      if (chapter) {
-        await updateProgress(book.id, chapter.id, positionMs);
-      }
     } catch (e) {
       console.error("Error seeking:", e);
+      return;
+    }
+
+    // Save progress in background (don't let DB errors break seek)
+    const chapter = chapters[currentChapterIndex];
+    if (chapter) {
+      updateProgress(book.id, chapter.id, positionMs).catch((e) =>
+        console.warn("Error saving progress after seek:", e)
+      );
     }
   }, []);
 

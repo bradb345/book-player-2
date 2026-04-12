@@ -111,10 +111,17 @@ export default function HomeScreen() {
     scanAllFolders();
   }, [scanAllFolders]);
 
-  // Load/refresh books when screen gains focus
+  // Load/refresh books when screen gains focus, and periodically while playing
   useFocusEffect(
     useCallback(() => {
       loadBooksRef.current?.();
+
+      // Refresh every 10s while a book is playing so progress bar stays current
+      const interval = setInterval(() => {
+        loadBooksRef.current?.();
+      }, 10000);
+
+      return () => clearInterval(interval);
     }, [])
   );
 
@@ -271,11 +278,7 @@ export default function HomeScreen() {
                   style={[styles.progressFill, { width: `${progressPercent}%` }]}
                 />
               </View>
-              {hasValidProgress ? (
-                <Text style={styles.progressText}>{Math.round(progressPercent)}%</Text>
-              ) : (
-                <Text style={styles.progressText}>Started</Text>
-              )}
+              <Text style={styles.progressText}>{Math.round(progressPercent)}%</Text>
             </View>
           )}
         </View>

@@ -53,13 +53,42 @@ export interface ListeningSession {
 }
 
 let db: SQLite.SQLiteDatabase | null = null;
+let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
+
+export function resetDatabase(): void {
+  db = null;
+  dbPromise = null;
+}
 
 export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (db) return db;
 
-  db = await SQLite.openDatabaseAsync("audiobooks.db");
-  await initializeDatabase(db);
-  return db;
+  // Prevent concurrent open attempts
+  if (dbPromise) return dbPromise;
+
+  dbPromise = (async () => {
+    const database = await SQLite.openDatabaseAsync("audiobooks.db");
+    await initializeDatabase(database);
+    db = database;
+    dbPromise = null;
+    return database;
+  })();
+
+  return dbPromise;
+}
+
+// Run a DB operation with one retry on NullPointerException (dead native handle)
+export async function withRetry<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("NullPointerException") || msg.includes("NativeDatabase")) {
+      resetDatabase();
+      return await operation();
+    }
+    throw e;
+  }
 }
 
 async function initializeDatabase(database: SQLite.SQLiteDatabase): Promise<void> {
@@ -127,12 +156,11 @@ async function initializeDatabase(database: SQLite.SQLiteDatabase): Promise<void
       ON listening_sessions(book_history_id, session_date);
   `);
 
-  // Backfill: create book_history rows for existing books that don't have one
+  // Cleanup: remove book_history rows that were created by the old backfill
+  // but never actually played (no listening sessions)
   await database.runAsync(`
-    INSERT OR IGNORE INTO book_history (book_id, title, author, cover_path, total_duration_ms, started_at, is_in_library)
-    SELECT b.id, b.title, b.author, b.cover_path, b.total_duration_ms, b.created_at, 1
-    FROM books b
-    WHERE NOT EXISTS (SELECT 1 FROM book_history bh WHERE bh.book_id = b.id)
+    DELETE FROM book_history
+    WHERE id NOT IN (SELECT DISTINCT book_history_id FROM listening_sessions)
   `);
 }
 
@@ -166,8 +194,10 @@ export async function insertChapter(
 }
 
 export async function getAllBooks(): Promise<Book[]> {
-  const database = await getDatabase();
-  return await database.getAllAsync<Book>(`SELECT * FROM books ORDER BY title`);
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getAllAsync<Book>(`SELECT * FROM books ORDER BY title`);
+  });
 }
 
 export async function getBookWithChapters(bookId: number): Promise<{ book: Book; chapters: Chapter[] } | null> {
@@ -196,38 +226,40 @@ export interface ProgressWithCumulative extends Progress {
 }
 
 export async function getProgressWithCumulativePosition(bookId: number): Promise<ProgressWithCumulative | null> {
-  const database = await getDatabase();
+  return withRetry(async () => {
+    const database = await getDatabase();
 
-  const progress = await database.getFirstAsync<Progress>(
-    `SELECT * FROM progress WHERE book_id = ?`,
-    [bookId]
-  );
+    const progress = await database.getFirstAsync<Progress>(
+      `SELECT * FROM progress WHERE book_id = ?`,
+      [bookId]
+    );
 
-  if (!progress) return null;
+    if (!progress) return null;
 
-  // Get the position (order) of the current chapter
-  const currentChapter = await database.getFirstAsync<{ position: number }>(
-    `SELECT position FROM chapters WHERE id = ?`,
-    [progress.current_chapter_id]
-  );
+    // Get the position (order) of the current chapter
+    const currentChapter = await database.getFirstAsync<{ position: number }>(
+      `SELECT position FROM chapters WHERE id = ?`,
+      [progress.current_chapter_id]
+    );
 
-  if (!currentChapter) {
-    // Chapter not found, return progress with just current position
-    return { ...progress, cumulative_position_ms: progress.position_ms };
-  }
+    if (!currentChapter) {
+      // Chapter not found, return progress with just current position
+      return { ...progress, cumulative_position_ms: progress.position_ms };
+    }
 
-  // Sum durations of all chapters before the current one
-  const result = await database.getFirstAsync<{ total_ms: number }>(
-    `SELECT COALESCE(SUM(duration_ms), 0) as total_ms
-     FROM chapters
-     WHERE book_id = ? AND position < ?`,
-    [bookId, currentChapter.position]
-  );
+    // Sum durations of all chapters before the current one
+    const result = await database.getFirstAsync<{ total_ms: number }>(
+      `SELECT COALESCE(SUM(duration_ms), 0) as total_ms
+       FROM chapters
+       WHERE book_id = ? AND position < ?`,
+      [bookId, currentChapter.position]
+    );
 
-  const previousChaptersDuration = result?.total_ms ?? 0;
-  const cumulativePosition = previousChaptersDuration + progress.position_ms;
+    const previousChaptersDuration = result?.total_ms ?? 0;
+    const cumulativePosition = previousChaptersDuration + progress.position_ms;
 
-  return { ...progress, cumulative_position_ms: cumulativePosition };
+    return { ...progress, cumulative_position_ms: cumulativePosition };
+  });
 }
 
 export async function updateProgress(
@@ -235,15 +267,25 @@ export async function updateProgress(
   currentChapterId: number,
   positionMs: number
 ): Promise<void> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(
+      `INSERT INTO progress (book_id, current_chapter_id, position_ms, last_played_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(book_id) DO UPDATE SET
+         current_chapter_id = excluded.current_chapter_id,
+         position_ms = excluded.position_ms,
+         last_played_at = CURRENT_TIMESTAMP`,
+      [bookId, currentChapterId, positionMs]
+    );
+  });
+}
+
+export async function updateChapterDuration(chapterId: number, durationMs: number): Promise<void> {
   const database = await getDatabase();
   await database.runAsync(
-    `INSERT INTO progress (book_id, current_chapter_id, position_ms, last_played_at)
-     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-     ON CONFLICT(book_id) DO UPDATE SET
-       current_chapter_id = excluded.current_chapter_id,
-       position_ms = excluded.position_ms,
-       last_played_at = CURRENT_TIMESTAMP`,
-    [bookId, currentChapterId, positionMs]
+    `UPDATE chapters SET duration_ms = ? WHERE id = ?`,
+    [durationMs, chapterId]
   );
 }
 
@@ -327,10 +369,11 @@ export async function getOrCreateBookHistory(bookId: number): Promise<BookHistor
   const book = await database.getFirstAsync<Book>(`SELECT * FROM books WHERE id = ?`, [bookId]);
   if (!book) throw new Error(`Book ${bookId} not found`);
 
+  const now = new Date().toISOString();
   const result = await database.runAsync(
     `INSERT INTO book_history (book_id, title, author, cover_path, total_duration_ms, started_at, is_in_library)
      VALUES (?, ?, ?, ?, ?, ?, 1)`,
-    [book.id, book.title, book.author, book.cover_path, book.total_duration_ms, book.created_at]
+    [book.id, book.title, book.author, book.cover_path, book.total_duration_ms, now]
   );
 
   return {
@@ -340,7 +383,7 @@ export async function getOrCreateBookHistory(bookId: number): Promise<BookHistor
     author: book.author,
     cover_path: book.cover_path,
     total_duration_ms: book.total_duration_ms,
-    started_at: book.created_at,
+    started_at: now,
     completed_at: null,
     is_in_library: 1,
   };
