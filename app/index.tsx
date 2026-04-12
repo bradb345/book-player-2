@@ -52,7 +52,7 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { state: audioState, togglePlayback } = useAudio();
-  const { isPlaying, book: currentBook, positionMs: audioPositionMs, durationMs: audioDurationMs, chapters: audioChapters, currentChapterIndex: audioChapterIndex } = audioState;
+  const { isPlaying, book: currentBook, positionMs: audioPositionMs, chapters: audioChapters, currentChapterIndex: audioChapterIndex } = audioState;
   const currentBookId = currentBook?.id ?? null;
 
   // Use ref to break dependency chain between callbacks

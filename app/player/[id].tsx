@@ -192,7 +192,9 @@ export default function PlayerScreen() {
           value={sliderValue}
           onSlidingStart={() => {
             isSeekingRef.current = true;
-            frozenSliderValueRef.current = durationMs > 0 ? positionMs / durationMs : 0;
+            const currentSliderValue = durationMs > 0 ? positionMs / durationMs : 0;
+            frozenSliderValueRef.current = currentSliderValue;
+            setSeekDisplayMs(Math.floor(currentSliderValue * durationMs));
           }}
           onValueChange={(value: number) => {
             if (isSeekingRef.current) {
