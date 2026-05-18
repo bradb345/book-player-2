@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import {
   TextInput,
   Alert,
   Image,
+  RefreshControl,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, useFocusEffect } from "expo-router";
@@ -24,10 +25,10 @@ import {
   deleteBook,
   updateBookTitle,
   resetBookProgress,
-  getAllFolderSources,
   markBookHistoryDeleted,
 } from "@/services/database";
-import { deleteBookFiles, scanAndImportFolder } from "@/services/scanner";
+import { deleteBookFiles } from "@/services/scanner";
+import { syncLibrary } from "@/services/sync";
 import { useAudio } from "@/services/audioContext";
 
 interface BookWithProgress extends Book {
@@ -44,6 +45,7 @@ type MenuAction = "edit" | "reset" | "delete";
 export default function HomeScreen() {
   const [books, setBooks] = useState<BookWithProgress[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [selectedBook, setSelectedBook] = useState<BookWithProgress | null>(null);
   const [menuVisible, setMenuVisible] = useState(false);
   const [editModalVisible, setEditModalVisible] = useState(false);
@@ -78,49 +80,47 @@ export default function HomeScreen() {
   // Keep ref in sync
   loadBooksRef.current = loadBooks;
 
-  const scanAllFolders = useCallback(async () => {
+  // Prevent overlapping sync runs (focus can fire rapidly).
+  const isSyncingRef = useRef(false);
+
+  const runSync = useCallback(async (showSpinner = false) => {
+    if (isSyncingRef.current) return;
+    isSyncingRef.current = true;
+    if (showSpinner) setRefreshing(true);
     try {
-      const folderSources = await getAllFolderSources();
-      let newBooksFound = false;
-
-      for (const source of folderSources) {
-        try {
-          const result = await scanAndImportFolder(source.uri);
-          if (result.success && result.booksImported > 0) {
-            newBooksFound = true;
-          } else if (!result.success) {
-            // Log failures silently - don't interrupt user with alerts for background scans
-            console.warn(`Scan failed for "${source.name}": ${result.message}`);
-          }
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          console.warn(`Scan error for "${source.name}": ${errorMessage}`);
-        }
-      }
-
-      if (newBooksFound) {
-        await loadBooksRef.current?.();
-      }
+      const result = await syncLibrary();
+      console.log(result.message);
     } catch (error) {
-      console.error("Error scanning folders:", error);
+      console.error("Error syncing library:", error);
+    } finally {
+      // Always reload — sync may have reconciled chapters or hidden/restored
+      // books even when nothing new was imported. Guard the reload so a
+      // rejecting loadBooks can't strand the in-flight flags and block every
+      // future sync / pull-to-refresh for the rest of the session.
+      try {
+        await loadBooksRef.current?.();
+      } catch (error) {
+        console.error("Error reloading books after sync:", error);
+      }
+      isSyncingRef.current = false;
+      if (showSpinner) setRefreshing(false);
     }
   }, []);
 
-  // Scan for new books once when app opens
-  useEffect(() => {
-    scanAllFolders();
-  }, [scanAllFolders]);
+  const runSyncRef = useRef<(showSpinner?: boolean) => Promise<void>>(undefined);
+  runSyncRef.current = runSync;
 
-  // Load/refresh books when screen gains focus, and periodically while playing
+  // Sync (import new + reconcile + hide/restore) when the screen gains focus —
+  // this also covers first mount. While a book is playing, additionally do a
+  // lightweight reload every 10s so the progress bar stays current.
   useFocusEffect(
     useCallback(() => {
-      loadBooksRef.current?.();
+      runSyncRef.current?.();
 
       if (!isPlaying || !currentBookId) {
         return;
       }
 
-      // Refresh every 10s while a book is playing so progress bar stays current
       const interval = setInterval(() => {
         loadBooksRef.current?.();
       }, 10000);
@@ -348,6 +348,14 @@ export default function HomeScreen() {
             { paddingBottom: insets.bottom + 80 },
           ]}
           stickySectionHeadersEnabled={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={() => runSync(true)}
+              tintColor={colors.white}
+              colors={[colors.red]}
+            />
+          }
         />
       )}
 

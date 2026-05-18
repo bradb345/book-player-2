@@ -8,8 +8,16 @@ import {
   bookExistsAtPath,
 } from "./database";
 
-const AUDIO_EXTENSIONS = [".mp3", ".m4a", ".m4b", ".aac", ".wav", ".flac", ".ogg"];
+export const AUDIO_EXTENSIONS = [".mp3", ".m4a", ".m4b", ".aac", ".wav", ".flac", ".ogg"];
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
+// Files that commonly sit next to audio (metadata, art sidecars, playlists,
+// logs). They are never directories, so we can skip the recurse-and-catch SAF
+// probe for them — that probe is a native call that must fail before we move
+// on, which adds up across a large library.
+const COMPANION_FILE_EXTENSIONS = [
+  ".txt", ".pdf", ".cue", ".opf", ".nfo", ".m3u", ".m3u8", ".log", ".json",
+  ".xml", ".lrc", ".srt", ".vtt", ".db", ".ini", ".sfv", ".md5", ".epub",
+];
 const COVER_FILENAMES = ["cover", "folder", "front", "album", "artwork"];
 const AUDIO_MIME_TYPES = [
   "audio/mpeg",
@@ -26,7 +34,13 @@ const AUDIO_MIME_TYPES = [
 interface ScannedFile {
   name: string;
   uri: string;
+  // Relative path from the book root, used so nested files (e.g. CD1/01.mp3,
+  // CD2/01.mp3) sort in the right order instead of colliding on basename.
+  sortKey?: string;
 }
+
+// Guard against pathological deep trees / unexpected cycles while recursing.
+const MAX_SCAN_DEPTH = 8;
 
 interface ImportResult {
   success: boolean;
@@ -81,20 +95,47 @@ function isCoverImage(filename: string): boolean {
   return COVER_FILENAMES.some((name) => nameWithoutExt === name || nameWithoutExt.startsWith(name));
 }
 
-function getBookTitleFromPath(path: string): string {
-  const parts = path.split("/");
-  const lastPart = parts[parts.length - 1] || parts[parts.length - 2] || "Unknown Book";
-  // Remove extension if it's a file
-  const dotIndex = lastPart.lastIndexOf(".");
-  if (dotIndex > 0 && AUDIO_EXTENSIONS.some((ext) => lastPart.toLowerCase().endsWith(ext))) {
-    return decodeURIComponent(lastPart.substring(0, dotIndex));
+// Extract the final, human-readable segment of a file path or SAF URI.
+// SAF document URIs look like
+//   content://com.android.externalstorage.documents/tree/primary%3ABooks/document/primary%3ABooks%2FThe%20Hobbit
+// where the real path lives in the part after "/document/" and its separators
+// are percent-encoded (%2F). We must decode *before* splitting, and drop the
+// "primary:" volume prefix, otherwise the name comes out as "primary:Books/The Hobbit".
+function lastUriSegment(uri: string): string {
+  let s = uri;
+  const docMarker = "/document/";
+  const docIdx = s.lastIndexOf(docMarker);
+  if (docIdx !== -1) {
+    s = s.substring(docIdx + docMarker.length);
   }
-  // Decode URI components for folder names
   try {
-    return decodeURIComponent(lastPart) || "Unknown Book";
+    s = decodeURIComponent(s);
   } catch {
-    return lastPart || "Unknown Book";
+    // Keep as-is if it isn't valid percent-encoding.
   }
+  s = s.replace(/\/+$/, "");
+  const slash = s.lastIndexOf("/");
+  if (slash !== -1) {
+    // A real leaf segment never carries the "volume:" prefix, and may
+    // legitimately contain a colon (e.g. "Vol 1: The Hobbit") — keep it intact.
+    s = s.substring(slash + 1);
+  } else {
+    // No slash: a tree-root document id like "primary:Books". Strip only the
+    // leading volume prefix (volume ids never contain a colon themselves).
+    const colon = s.indexOf(":");
+    if (colon !== -1) s = s.substring(colon + 1);
+  }
+  return s;
+}
+
+export function getBookTitleFromPath(path: string): string {
+  const seg = lastUriSegment(path);
+  if (!seg) return "Unknown Book";
+  if (AUDIO_EXTENSIONS.some((ext) => seg.toLowerCase().endsWith(ext))) {
+    const dotIndex = seg.lastIndexOf(".");
+    return dotIndex > 0 ? seg.substring(0, dotIndex) : seg;
+  }
+  return seg;
 }
 
 function getChapterTitleFromFilename(filename: string): string {
@@ -127,14 +168,7 @@ function getParentDirectory(uri: string): string {
 }
 
 function getFolderName(uri: string): string {
-  const cleanUri = uri.endsWith("/") ? uri.slice(0, -1) : uri;
-  const parts = cleanUri.split("/");
-  const name = parts[parts.length - 1];
-  try {
-    return decodeURIComponent(name);
-  } catch {
-    return name;
-  }
+  return lastUriSegment(uri) || uri;
 }
 
 function sanitizeFilename(filename: string): string {
@@ -452,7 +486,7 @@ async function importBookFromDirectory(
       return false;
     }
 
-    audioFiles.sort((a, b) => naturalSort(a.name, b.name));
+    audioFiles.sort((a, b) => naturalSort(a.sortKey ?? a.name, b.sortKey ?? b.name));
 
     if (audioFiles.length === 0) {
       return false;
@@ -508,21 +542,93 @@ async function importSingleFile(
   }
 }
 
-async function importBookFromSAFDirectory(directoryUri: string): Promise<boolean> {
-  try {
-    const contentUris = await StorageAccessFramework.readDirectoryAsync(directoryUri);
+// Recursively collect every audio/image file under an Android SAF directory.
+// A book folder can be arbitrarily nested (Book/CD1/.., Book/CD2/..); we walk
+// it the way Voice's ChapterParser.parseChapters does.
+async function walkSAFTree(
+  directoryUri: string,
+  depth = 0,
+  relPrefix = "",
+): Promise<{ audioFiles: ScannedFile[]; imageFiles: ScannedFile[] }> {
+  const audioFiles: ScannedFile[] = [];
+  const imageFiles: ScannedFile[] = [];
+  if (depth > MAX_SCAN_DEPTH) return { audioFiles, imageFiles };
 
-    const audioFiles: ScannedFile[] = [];
-    const imageFiles: ScannedFile[] = [];
-    for (const uri of contentUris) {
-      const filename = getFilenameFromUri(uri);
-      if (isAudioFile(filename)) {
-        audioFiles.push({ name: filename, uri });
-      } else if (isImageFile(filename)) {
-        imageFiles.push({ name: filename, uri });
+  const contentUris = await StorageAccessFramework.readDirectoryAsync(directoryUri);
+  for (const uri of contentUris) {
+    const filename = getFilenameFromUri(uri);
+    const rel = relPrefix ? `${relPrefix}/${filename}` : filename;
+
+    if (isAudioFile(filename)) {
+      audioFiles.push({ name: filename, uri, sortKey: rel });
+    } else if (isImageFile(filename)) {
+      imageFiles.push({ name: filename, uri, sortKey: rel });
+    } else if (
+      COMPANION_FILE_EXTENSIONS.some((ext) => filename.toLowerCase().endsWith(ext))
+    ) {
+      // Known non-directory companion file — skip the costly SAF probe.
+    } else {
+      // Unknown entry — probe whether it's a subdirectory and recurse.
+      try {
+        const sub = await walkSAFTree(uri, depth + 1, rel);
+        audioFiles.push(...sub.audioFiles);
+        imageFiles.push(...sub.imageFiles);
+      } catch {
+        // Not a directory; skip.
       }
     }
+  }
+  return { audioFiles, imageFiles };
+}
 
+// Recursively collect every audio/image file under a local (iOS) directory.
+async function walkLocalTree(
+  directoryUri: string,
+  depth = 0,
+  relPrefix = "",
+): Promise<{ audioFiles: ScannedFile[]; imageFiles: ScannedFile[] }> {
+  const audioFiles: ScannedFile[] = [];
+  const imageFiles: ScannedFile[] = [];
+  if (depth > MAX_SCAN_DEPTH) return { audioFiles, imageFiles };
+
+  const contents = await FileSystem.readDirectoryAsync(directoryUri);
+  for (const item of contents) {
+    const itemUri = `${directoryUri}/${item}`;
+    const rel = relPrefix ? `${relPrefix}/${item}` : item;
+    const info = await FileSystem.getInfoAsync(itemUri);
+
+    if (info.isDirectory) {
+      const sub = await walkLocalTree(itemUri, depth + 1, rel);
+      audioFiles.push(...sub.audioFiles);
+      imageFiles.push(...sub.imageFiles);
+    } else if (isAudioFile(item)) {
+      audioFiles.push({ name: item, uri: itemUri, sortKey: rel });
+    } else if (isImageFile(item)) {
+      imageFiles.push({ name: item, uri: itemUri, sortKey: rel });
+    }
+  }
+  return { audioFiles, imageFiles };
+}
+
+// Sync helper: list every audio file under a SAF book folder (recursively).
+// `uri` matches exactly what import stores in chapters.file_path for SAF books,
+// so the result can be diffed against the DB.
+export async function collectSAFBookFiles(
+  directoryUri: string,
+): Promise<{ uri: string; name: string; sortKey: string }[]> {
+  const { audioFiles } = await walkSAFTree(directoryUri);
+  return audioFiles.map((f) => ({
+    uri: f.uri,
+    name: f.name,
+    sortKey: f.sortKey ?? f.name,
+  }));
+}
+
+export { getChapterTitleFromFilename };
+
+async function importBookFromSAFDirectory(directoryUri: string): Promise<boolean> {
+  try {
+    const { audioFiles, imageFiles } = await walkSAFTree(directoryUri);
     return importBookFromDirectory(audioFiles, imageFiles, directoryUri, directoryUri, safResolver);
   } catch (error) {
     console.error("Error importing book from SAF directory:", error);
@@ -537,15 +643,7 @@ async function importBookFromLocalDirectory(directoryUri: string): Promise<boole
       return false;
     }
 
-    const contents = await FileSystem.readDirectoryAsync(directoryUri);
-
-    const audioFiles = contents
-      .filter(isAudioFile)
-      .map((name) => ({ name, uri: `${directoryUri}/${name}` }));
-
-    const imageFiles = contents
-      .filter(isImageFile)
-      .map((name) => ({ name, uri: `${directoryUri}/${name}` }));
+    const { audioFiles, imageFiles } = await walkLocalTree(directoryUri);
 
     return importBookFromDirectory(audioFiles, imageFiles, directoryUri, directoryUri, localResolver);
   } catch (error) {
