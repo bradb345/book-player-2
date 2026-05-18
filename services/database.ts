@@ -168,6 +168,19 @@ async function initializeDatabase(database: SQLite.SQLiteDatabase): Promise<void
     DELETE FROM book_history
     WHERE id NOT IN (SELECT DISTINCT book_history_id FROM listening_sessions)
   `);
+
+  // Migration: books.is_active. Inactive books are ones whose source files
+  // vanished on a sync pass — hidden from the library but kept (with progress
+  // + history) so they reappear if the files come back. SQLite has no
+  // "ADD COLUMN IF NOT EXISTS", so probe the schema first.
+  const bookColumns = await database.getAllAsync<{ name: string }>(
+    `PRAGMA table_info(books)`
+  );
+  if (!bookColumns.some((c) => c.name === "is_active")) {
+    await database.execAsync(
+      `ALTER TABLE books ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`
+    );
+  }
 }
 
 export async function insertBook(
@@ -202,7 +215,170 @@ export async function insertChapter(
 export async function getAllBooks(): Promise<Book[]> {
   return withRetry(async () => {
     const database = await getDatabase();
-    return await database.getAllAsync<Book>(`SELECT * FROM books ORDER BY title`);
+    return await database.getAllAsync<Book>(
+      `SELECT * FROM books WHERE is_active = 1 ORDER BY title`
+    );
+  });
+}
+
+// ---- Sync support ----
+
+export interface SyncBookRow {
+  id: number;
+  folder_path: string;
+  is_active: number;
+}
+
+// All books including inactive ones — the sync pass needs to see hidden books
+// so it can reactivate them when their files reappear.
+export async function getBooksForSync(): Promise<SyncBookRow[]> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getAllAsync<SyncBookRow>(
+      `SELECT id, folder_path, is_active FROM books`
+    );
+  });
+}
+
+// Books whose title still contains a "/" — the signature of the old SAF
+// URI-decoding bug (e.g. "primary:Books/The Hobbit"). A real book/folder name
+// never contains a slash, and user-edited titles won't either, so this is a
+// safe filter for the one-time title repair.
+export async function getBooksNeedingTitleRepair(): Promise<
+  { id: number; folder_path: string; title: string }[]
+> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getAllAsync<{
+      id: number;
+      folder_path: string;
+      title: string;
+    }>(`SELECT id, folder_path, title FROM books WHERE title LIKE '%/%'`);
+  });
+}
+
+export async function setBookActive(bookId: number, active: boolean): Promise<void> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(`UPDATE books SET is_active = ? WHERE id = ?`, [
+      active ? 1 : 0,
+      bookId,
+    ]);
+  });
+}
+
+export interface ReconcileResult {
+  added: number;
+  removed: number;
+  kept: number;
+}
+
+// Reconcile a book's chapters against the `desired` list discovered on disk.
+// Chapters are matched by file_path: existing rows are kept (so their ids stay
+// stable and playback progress survives), missing ones are deleted, new ones
+// inserted, and positions renumbered. If the chapter the user was on is gone,
+// progress is repaired to the first chapter (mirrors Voice's MediaScanner).
+export async function reconcileBookChapters(
+  bookId: number,
+  desired: { filePath: string; title: string }[]
+): Promise<ReconcileResult> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+
+    const existing = await database.getAllAsync<{
+      id: number;
+      file_path: string;
+    }>(`SELECT id, file_path FROM chapters WHERE book_id = ?`, [bookId]);
+
+    const existingByPath = new Map(existing.map((c) => [c.file_path, c]));
+    const desiredPaths = new Set(desired.map((d) => d.filePath));
+
+    const progress = await database.getFirstAsync<{
+      current_chapter_id: number | null;
+    }>(`SELECT current_chapter_id FROM progress WHERE book_id = ?`, [bookId]);
+
+    const currentPath =
+      progress?.current_chapter_id != null
+        ? existing.find((c) => c.id === progress.current_chapter_id)?.file_path ?? null
+        : null;
+
+    const toDelete = existing.filter((c) => !desiredPaths.has(c.file_path));
+    let added = 0;
+    let kept = 0;
+
+    await database.withTransactionAsync(async () => {
+      for (const c of toDelete) {
+        await database.runAsync(`DELETE FROM chapters WHERE id = ?`, [c.id]);
+      }
+      for (let i = 0; i < desired.length; i++) {
+        const d = desired[i];
+        const ex = existingByPath.get(d.filePath);
+        if (ex) {
+          await database.runAsync(
+            `UPDATE chapters SET position = ?, title = ? WHERE id = ?`,
+            [i, d.title, ex.id]
+          );
+          kept++;
+        } else {
+          // chapters.file_path is globally UNIQUE. If this path already belongs
+          // to a different book, the source folders overlap — skip rather than
+          // crash the whole sync on the constraint.
+          const owner = await database.getFirstAsync<{ book_id: number }>(
+            `SELECT book_id FROM chapters WHERE file_path = ?`,
+            [d.filePath]
+          );
+          if (owner && owner.book_id !== bookId) {
+            console.warn(
+              `Sync: skipping chapter already owned by book ${owner.book_id}: ${d.filePath}`
+            );
+            continue;
+          }
+          await database.runAsync(
+            `INSERT INTO chapters (book_id, title, file_path, position, duration_ms) VALUES (?, ?, ?, ?, 0)`,
+            [bookId, d.title, d.filePath, i]
+          );
+          added++;
+        }
+      }
+
+      // Durations are filled in lazily by the player; recompute the book total
+      // from whatever is currently known so a removed chapter doesn't inflate it.
+      await database.runAsync(
+        `UPDATE books SET total_duration_ms =
+           (SELECT COALESCE(SUM(duration_ms), 0) FROM chapters WHERE book_id = ?)
+         WHERE id = ?`,
+        [bookId, bookId]
+      );
+
+      if (progress) {
+        if (currentPath && desiredPaths.has(currentPath)) {
+          const nc = await database.getFirstAsync<{ id: number }>(
+            `SELECT id FROM chapters WHERE book_id = ? AND file_path = ?`,
+            [bookId, currentPath]
+          );
+          if (nc) {
+            await database.runAsync(
+              `UPDATE progress SET current_chapter_id = ? WHERE book_id = ?`,
+              [nc.id, bookId]
+            );
+          }
+        } else {
+          // The chapter the listener was on disappeared — restart the book.
+          const first = await database.getFirstAsync<{ id: number }>(
+            `SELECT id FROM chapters WHERE book_id = ? ORDER BY position LIMIT 1`,
+            [bookId]
+          );
+          if (first) {
+            await database.runAsync(
+              `UPDATE progress SET current_chapter_id = ?, position_ms = 0 WHERE book_id = ?`,
+              [first.id, bookId]
+            );
+          }
+        }
+      }
+    });
+
+    return { added, removed: toDelete.length, kept };
   });
 }
 
@@ -383,17 +559,14 @@ export async function getOrCreateBookHistory(bookId: number): Promise<BookHistor
     [book.id, book.title, book.author, book.cover_path, book.total_duration_ms]
   );
 
-  return {
-    id: result.lastInsertRowId,
-    book_id: book.id,
-    title: book.title,
-    author: book.author,
-    cover_path: book.cover_path,
-    total_duration_ms: book.total_duration_ms,
-    started_at: now,
-    completed_at: null,
-    is_in_library: 1,
-  };
+  // Read the row back so started_at reflects the actual CURRENT_TIMESTAMP the
+  // DB wrote (avoids a JS/SQLite timezone + format mismatch).
+  const created = await database.getFirstAsync<BookHistory>(
+    `SELECT * FROM book_history WHERE id = ?`,
+    [result.lastInsertRowId]
+  );
+  if (!created) throw new Error(`Failed to create book history for book ${bookId}`);
+  return created;
 }
 
 export async function markBookHistoryCompleted(bookHistoryId: number): Promise<void> {
