@@ -10,6 +10,14 @@ import {
 
 export const AUDIO_EXTENSIONS = [".mp3", ".m4a", ".m4b", ".aac", ".wav", ".flac", ".ogg"];
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
+// Files that commonly sit next to audio (metadata, art sidecars, playlists,
+// logs). They are never directories, so we can skip the recurse-and-catch SAF
+// probe for them — that probe is a native call that must fail before we move
+// on, which adds up across a large library.
+const COMPANION_FILE_EXTENSIONS = [
+  ".txt", ".pdf", ".cue", ".opf", ".nfo", ".m3u", ".m3u8", ".log", ".json",
+  ".xml", ".lrc", ".srt", ".vtt", ".db", ".ini", ".sfv", ".md5", ".epub",
+];
 const COVER_FILENAMES = ["cover", "folder", "front", "album", "artwork"];
 const AUDIO_MIME_TYPES = [
   "audio/mpeg",
@@ -107,10 +115,16 @@ function lastUriSegment(uri: string): string {
   }
   s = s.replace(/\/+$/, "");
   const slash = s.lastIndexOf("/");
-  if (slash !== -1) s = s.substring(slash + 1);
-  // Tree-root document ids look like "primary:Books" — keep only the leaf.
-  const colon = s.lastIndexOf(":");
-  if (colon !== -1) s = s.substring(colon + 1);
+  if (slash !== -1) {
+    // A real leaf segment never carries the "volume:" prefix, and may
+    // legitimately contain a colon (e.g. "Vol 1: The Hobbit") — keep it intact.
+    s = s.substring(slash + 1);
+  } else {
+    // No slash: a tree-root document id like "primary:Books". Strip only the
+    // leading volume prefix (volume ids never contain a colon themselves).
+    const colon = s.indexOf(":");
+    if (colon !== -1) s = s.substring(colon + 1);
+  }
   return s;
 }
 
@@ -549,8 +563,12 @@ async function walkSAFTree(
       audioFiles.push({ name: filename, uri, sortKey: rel });
     } else if (isImageFile(filename)) {
       imageFiles.push({ name: filename, uri, sortKey: rel });
+    } else if (
+      COMPANION_FILE_EXTENSIONS.some((ext) => filename.toLowerCase().endsWith(ext))
+    ) {
+      // Known non-directory companion file — skip the costly SAF probe.
     } else {
-      // Not a recognized file — probe whether it's a subdirectory and recurse.
+      // Unknown entry — probe whether it's a subdirectory and recurse.
       try {
         const sub = await walkSAFTree(uri, depth + 1, rel);
         audioFiles.push(...sub.audioFiles);

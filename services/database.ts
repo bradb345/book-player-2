@@ -7,6 +7,7 @@ export interface Book {
   cover_path: string | null;
   folder_path: string;
   total_duration_ms: number;
+  is_active: number;
   created_at: string;
 }
 
@@ -278,6 +279,10 @@ export interface ReconcileResult {
 // stable and playback progress survives), missing ones are deleted, new ones
 // inserted, and positions renumbered. If the chapter the user was on is gone,
 // progress is repaired to the first chapter (mirrors Voice's MediaScanner).
+//
+// CONTRACT: `desired` MUST already be in the intended playback order — each
+// chapter's `position` is set to its index in this array. The caller
+// (syncLibrary) sorts the scanned files before mapping to `desired`.
 export async function reconcileBookChapters(
   bookId: number,
   desired: { filePath: string; title: string }[]
@@ -341,17 +346,27 @@ export async function reconcileBookChapters(
         }
       }
 
-      // Durations are filled in lazily by the player; recompute the book total
-      // from whatever is currently known so a removed chapter doesn't inflate it.
-      await database.runAsync(
-        `UPDATE books SET total_duration_ms =
-           (SELECT COALESCE(SUM(duration_ms), 0) FROM chapters WHERE book_id = ?)
-         WHERE id = ?`,
-        [bookId, bookId]
-      );
+      // Durations are filled in lazily by the player. Only recompute the book
+      // total when a chapter was *removed* — otherwise the SUM (which counts
+      // not-yet-probed new chapters as 0) would shrink the total on every
+      // reconcile that adds chapters, until playback refills it.
+      if (toDelete.length > 0) {
+        await database.runAsync(
+          `UPDATE books SET total_duration_ms =
+             (SELECT COALESCE(SUM(duration_ms), 0) FROM chapters WHERE book_id = ?)
+           WHERE id = ?`,
+          [bookId, bookId]
+        );
+      }
 
-      if (progress) {
-        if (currentPath && desiredPaths.has(currentPath)) {
+      // Only touch progress when the listener was actually on a chapter.
+      // A progress row with current_chapter_id = NULL is legitimate (e.g. the
+      // FK's ON DELETE SET NULL, or a freshly created row) — rewriting it to
+      // chapter 1 / position 0 here would be destructive and would re-fire on
+      // every sync pass even when no files changed.
+      if (progress && currentPath) {
+        if (desiredPaths.has(currentPath)) {
+          // The listener's chapter survived — re-point at its (kept) row id.
           const nc = await database.getFirstAsync<{ id: number }>(
             `SELECT id FROM chapters WHERE book_id = ? AND file_path = ?`,
             [bookId, currentPath]

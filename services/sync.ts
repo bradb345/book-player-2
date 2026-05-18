@@ -84,8 +84,11 @@ export async function syncLibrary(): Promise<SyncResult> {
   // 2. Reconcile existing books that live under a SAF source.
   const dbBooks = await getBooksForSync();
   for (const book of dbBooks) {
+    // Anchor the prefix with a trailing "/" so a source URI that is a string
+    // prefix of another (e.g. ".../tree/primary%3ABook" vs
+    // ".../tree/primary%3ABooks") can't falsely claim the longer source's books.
     const underSaf = safSources.some(
-      (s) => book.folder_path === s.uri || book.folder_path.startsWith(s.uri)
+      (s) => book.folder_path === s.uri || book.folder_path.startsWith(s.uri + "/")
     );
     if (!underSaf) continue;
 

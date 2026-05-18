@@ -94,8 +94,14 @@ export default function HomeScreen() {
       console.error("Error syncing library:", error);
     } finally {
       // Always reload — sync may have reconciled chapters or hidden/restored
-      // books even when nothing new was imported.
-      await loadBooksRef.current?.();
+      // books even when nothing new was imported. Guard the reload so a
+      // rejecting loadBooks can't strand the in-flight flags and block every
+      // future sync / pull-to-refresh for the rest of the session.
+      try {
+        await loadBooksRef.current?.();
+      } catch (error) {
+        console.error("Error reloading books after sync:", error);
+      }
       isSyncingRef.current = false;
       if (showSpinner) setRefreshing(false);
     }
