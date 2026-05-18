@@ -84,18 +84,50 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   return dbPromise;
 }
 
-// Run a DB operation with one retry on NullPointerException (dead native handle)
+// Serializes every DB operation onto the single shared connection.
+//
+// expo-sqlite uses one embedded native connection. The audio player writes
+// continuously while a book plays (progress, chapter/book durations, listening
+// sessions); meanwhile a screen focus can fire a full library sync whose
+// reconcile step runs a `withTransactionAsync` (BEGIN … many awaits … COMMIT).
+// If those interleave on the same connection and the dead-handle reset below
+// fires, a concurrent caller's `getDatabase()` reopens a *second* physical
+// connection mid-flight, finalizing the native handle — the source of
+// "NativeDatabase.execAsync … NullPointerException", which then cascades as
+// every other in-flight op hits the same nulled handle.
+//
+// One mutex => exactly one operation (including a whole transaction) touches
+// the connection at a time, and the reset+reopen happens while the lock is
+// held so no other caller can observe the nulled handle.
+let opChain: Promise<unknown> = Promise.resolve();
+
+// Run a DB operation exclusively (serialized) with one retry on a dead native
+// handle. Must NOT be called from within another withRetry callback — that
+// would deadlock on the queue.
 export async function withRetry<T>(operation: () => Promise<T>): Promise<T> {
-  try {
-    return await operation();
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("NullPointerException") || msg.includes("NativeDatabase")) {
-      resetDatabase();
+  const run = async (): Promise<T> => {
+    try {
+      await getDatabase();
       return await operation();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("NullPointerException") || msg.includes("NativeDatabase")) {
+        resetDatabase();
+        await getDatabase();
+        return await operation();
+      }
+      throw e;
     }
-    throw e;
-  }
+  };
+  // Chain onto the queue whether the previous op resolved or rejected, so a
+  // single failure can't wedge it. The caller gets `result`; the queue tracks
+  // a settled (error-swallowed) view so the next op just waits its turn.
+  const result = opChain.then(run, run);
+  opChain = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
 }
 
 async function initializeDatabase(database: SQLite.SQLiteDatabase): Promise<void> {
@@ -190,12 +222,14 @@ export async function insertBook(
   author?: string,
   coverPath?: string
 ): Promise<number> {
-  const database = await getDatabase();
-  const result = await database.runAsync(
-    `INSERT INTO books (title, author, cover_path, folder_path) VALUES (?, ?, ?, ?)`,
-    [title, author ?? null, coverPath ?? null, folderPath]
-  );
-  return result.lastInsertRowId;
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const result = await database.runAsync(
+      `INSERT INTO books (title, author, cover_path, folder_path) VALUES (?, ?, ?, ?)`,
+      [title, author ?? null, coverPath ?? null, folderPath]
+    );
+    return result.lastInsertRowId;
+  });
 }
 
 export async function insertChapter(
@@ -205,12 +239,14 @@ export async function insertChapter(
   position: number,
   durationMs: number = 0
 ): Promise<number> {
-  const database = await getDatabase();
-  const result = await database.runAsync(
-    `INSERT INTO chapters (book_id, title, file_path, position, duration_ms) VALUES (?, ?, ?, ?, ?)`,
-    [bookId, title, filePath, position, durationMs]
-  );
-  return result.lastInsertRowId;
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const result = await database.runAsync(
+      `INSERT INTO chapters (book_id, title, file_path, position, duration_ms) VALUES (?, ?, ?, ?, ?)`,
+      [bookId, title, filePath, position, durationMs]
+    );
+    return result.lastInsertRowId;
+  });
 }
 
 export async function getAllBooks(): Promise<Book[]> {
@@ -398,24 +434,28 @@ export async function reconcileBookChapters(
 }
 
 export async function getBookWithChapters(bookId: number): Promise<{ book: Book; chapters: Chapter[] } | null> {
-  const database = await getDatabase();
-  const book = await database.getFirstAsync<Book>(`SELECT * FROM books WHERE id = ?`, [bookId]);
-  if (!book) return null;
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const book = await database.getFirstAsync<Book>(`SELECT * FROM books WHERE id = ?`, [bookId]);
+    if (!book) return null;
 
-  const chapters = await database.getAllAsync<Chapter>(
-    `SELECT * FROM chapters WHERE book_id = ? ORDER BY position`,
-    [bookId]
-  );
+    const chapters = await database.getAllAsync<Chapter>(
+      `SELECT * FROM chapters WHERE book_id = ? ORDER BY position`,
+      [bookId]
+    );
 
-  return { book, chapters };
+    return { book, chapters };
+  });
 }
 
 export async function getProgress(bookId: number): Promise<Progress | null> {
-  const database = await getDatabase();
-  return await database.getFirstAsync<Progress>(
-    `SELECT * FROM progress WHERE book_id = ?`,
-    [bookId]
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getFirstAsync<Progress>(
+      `SELECT * FROM progress WHERE book_id = ?`,
+      [bookId]
+    );
+  });
 }
 
 export interface ProgressWithCumulative extends Progress {
@@ -489,219 +529,265 @@ export async function updateChapterDuration(chapterId: number, durationMs: numbe
 }
 
 export async function updateBookDuration(bookId: number, totalDurationMs: number): Promise<void> {
-  const database = await getDatabase();
-  await database.runAsync(
-    `UPDATE books SET total_duration_ms = ? WHERE id = ?`,
-    [totalDurationMs, bookId]
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(
+      `UPDATE books SET total_duration_ms = ? WHERE id = ?`,
+      [totalDurationMs, bookId]
+    );
+  });
 }
 
 export async function deleteBook(bookId: number): Promise<void> {
-  const database = await getDatabase();
-  await database.runAsync(`DELETE FROM books WHERE id = ?`, [bookId]);
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(`DELETE FROM books WHERE id = ?`, [bookId]);
+  });
 }
 
 export async function updateBookTitle(bookId: number, title: string): Promise<void> {
-  const database = await getDatabase();
-  await database.runAsync(`UPDATE books SET title = ? WHERE id = ?`, [title, bookId]);
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(`UPDATE books SET title = ? WHERE id = ?`, [title, bookId]);
+  });
 }
 
 export async function updateBookAuthor(bookId: number, author: string | null): Promise<void> {
-  const database = await getDatabase();
-  await database.runAsync(`UPDATE books SET author = ? WHERE id = ?`, [author, bookId]);
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(`UPDATE books SET author = ? WHERE id = ?`, [author, bookId]);
+  });
 }
 
 export async function resetBookProgress(bookId: number): Promise<void> {
-  const database = await getDatabase();
-  await database.runAsync(`DELETE FROM progress WHERE book_id = ?`, [bookId]);
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(`DELETE FROM progress WHERE book_id = ?`, [bookId]);
+  });
 }
 
 export async function bookExistsAtPath(folderPath: string): Promise<boolean> {
-  const database = await getDatabase();
-  const result = await database.getFirstAsync<{ count: number }>(
-    `SELECT COUNT(*) as count FROM books WHERE folder_path = ?`,
-    [folderPath]
-  );
-  return (result?.count ?? 0) > 0;
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const result = await database.getFirstAsync<{ count: number }>(
+      `SELECT COUNT(*) as count FROM books WHERE folder_path = ?`,
+      [folderPath]
+    );
+    return (result?.count ?? 0) > 0;
+  });
 }
 
 // Folder source management
 export async function addFolderSource(uri: string, name: string): Promise<number> {
-  const database = await getDatabase();
-  const result = await database.runAsync(
-    `INSERT OR IGNORE INTO folder_sources (uri, name) VALUES (?, ?)`,
-    [uri, name]
-  );
-  return result.lastInsertRowId;
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const result = await database.runAsync(
+      `INSERT OR IGNORE INTO folder_sources (uri, name) VALUES (?, ?)`,
+      [uri, name]
+    );
+    return result.lastInsertRowId;
+  });
 }
 
 export async function getAllFolderSources(): Promise<FolderSource[]> {
-  const database = await getDatabase();
-  return await database.getAllAsync<FolderSource>(
-    `SELECT * FROM folder_sources ORDER BY created_at DESC`
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getAllAsync<FolderSource>(
+      `SELECT * FROM folder_sources ORDER BY created_at DESC`
+    );
+  });
 }
 
 export async function removeFolderSource(id: number): Promise<void> {
-  const database = await getDatabase();
-  await database.runAsync(`DELETE FROM folder_sources WHERE id = ?`, [id]);
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(`DELETE FROM folder_sources WHERE id = ?`, [id]);
+  });
 }
 
 export async function folderSourceExists(uri: string): Promise<boolean> {
-  const database = await getDatabase();
-  const result = await database.getFirstAsync<{ count: number }>(
-    `SELECT COUNT(*) as count FROM folder_sources WHERE uri = ?`,
-    [uri]
-  );
-  return (result?.count ?? 0) > 0;
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const result = await database.getFirstAsync<{ count: number }>(
+      `SELECT COUNT(*) as count FROM folder_sources WHERE uri = ?`,
+      [uri]
+    );
+    return (result?.count ?? 0) > 0;
+  });
 }
 
 // Book history management
 export async function getOrCreateBookHistory(bookId: number): Promise<BookHistory> {
-  const database = await getDatabase();
-  const existing = await database.getFirstAsync<BookHistory>(
-    `SELECT * FROM book_history WHERE book_id = ?`,
-    [bookId]
-  );
-  if (existing) return existing;
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const existing = await database.getFirstAsync<BookHistory>(
+      `SELECT * FROM book_history WHERE book_id = ?`,
+      [bookId]
+    );
+    if (existing) return existing;
 
-  const book = await database.getFirstAsync<Book>(`SELECT * FROM books WHERE id = ?`, [bookId]);
-  if (!book) throw new Error(`Book ${bookId} not found`);
+    const book = await database.getFirstAsync<Book>(`SELECT * FROM books WHERE id = ?`, [bookId]);
+    if (!book) throw new Error(`Book ${bookId} not found`);
 
-  const result = await database.runAsync(
-    `INSERT INTO book_history (book_id, title, author, cover_path, total_duration_ms, started_at, is_in_library)
-     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1)`,
-    [book.id, book.title, book.author, book.cover_path, book.total_duration_ms]
-  );
+    const result = await database.runAsync(
+      `INSERT INTO book_history (book_id, title, author, cover_path, total_duration_ms, started_at, is_in_library)
+       VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1)`,
+      [book.id, book.title, book.author, book.cover_path, book.total_duration_ms]
+    );
 
-  // Read the row back so started_at reflects the actual CURRENT_TIMESTAMP the
-  // DB wrote (avoids a JS/SQLite timezone + format mismatch).
-  const created = await database.getFirstAsync<BookHistory>(
-    `SELECT * FROM book_history WHERE id = ?`,
-    [result.lastInsertRowId]
-  );
-  if (!created) throw new Error(`Failed to create book history for book ${bookId}`);
-  return created;
+    // Read the row back so started_at reflects the actual CURRENT_TIMESTAMP the
+    // DB wrote (avoids a JS/SQLite timezone + format mismatch).
+    const created = await database.getFirstAsync<BookHistory>(
+      `SELECT * FROM book_history WHERE id = ?`,
+      [result.lastInsertRowId]
+    );
+    if (!created) throw new Error(`Failed to create book history for book ${bookId}`);
+    return created;
+  });
 }
 
 export async function markBookHistoryCompleted(bookHistoryId: number): Promise<void> {
-  const database = await getDatabase();
-  await database.runAsync(
-    `UPDATE book_history SET completed_at = CURRENT_TIMESTAMP WHERE id = ? AND completed_at IS NULL`,
-    [bookHistoryId]
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(
+      `UPDATE book_history SET completed_at = CURRENT_TIMESTAMP WHERE id = ? AND completed_at IS NULL`,
+      [bookHistoryId]
+    );
+  });
 }
 
 export async function markBookHistoryDeleted(bookId: number): Promise<void> {
-  const database = await getDatabase();
-  await database.runAsync(
-    `UPDATE book_history SET is_in_library = 0, book_id = NULL WHERE book_id = ?`,
-    [bookId]
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(
+      `UPDATE book_history SET is_in_library = 0, book_id = NULL WHERE book_id = ?`,
+      [bookId]
+    );
+  });
 }
 
 export async function updateBookHistoryDuration(bookHistoryId: number, totalDurationMs: number): Promise<void> {
-  const database = await getDatabase();
-  await database.runAsync(
-    `UPDATE book_history SET total_duration_ms = ? WHERE id = ?`,
-    [totalDurationMs, bookHistoryId]
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(
+      `UPDATE book_history SET total_duration_ms = ? WHERE id = ?`,
+      [totalDurationMs, bookHistoryId]
+    );
+  });
 }
 
 export async function getBookHistoryByBookId(bookId: number): Promise<BookHistory | null> {
-  const database = await getDatabase();
-  return await database.getFirstAsync<BookHistory>(
-    `SELECT * FROM book_history WHERE book_id = ?`,
-    [bookId]
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getFirstAsync<BookHistory>(
+      `SELECT * FROM book_history WHERE book_id = ?`,
+      [bookId]
+    );
+  });
 }
 
 export async function getBookHistoryById(id: number): Promise<BookHistory | null> {
-  const database = await getDatabase();
-  return await database.getFirstAsync<BookHistory>(
-    `SELECT * FROM book_history WHERE id = ?`,
-    [id]
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getFirstAsync<BookHistory>(
+      `SELECT * FROM book_history WHERE id = ?`,
+      [id]
+    );
+  });
 }
 
 export async function getAllBookHistory(): Promise<BookHistory[]> {
-  const database = await getDatabase();
-  return await database.getAllAsync<BookHistory>(
-    `SELECT * FROM book_history ORDER BY started_at DESC`
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getAllAsync<BookHistory>(
+      `SELECT * FROM book_history ORDER BY started_at DESC`
+    );
+  });
 }
 
 export async function upsertListeningSession(bookHistoryId: number, additionalMs: number): Promise<void> {
-  const database = await getDatabase();
-  const today = new Date().toISOString().split("T")[0];
-  await database.runAsync(
-    `INSERT INTO listening_sessions (book_history_id, duration_ms, session_date)
-     VALUES (?, ?, ?)
-     ON CONFLICT(book_history_id, session_date) DO UPDATE SET
-       duration_ms = duration_ms + excluded.duration_ms`,
-    [bookHistoryId, additionalMs, today]
-  );
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const today = new Date().toISOString().split("T")[0];
+    await database.runAsync(
+      `INSERT INTO listening_sessions (book_history_id, duration_ms, session_date)
+       VALUES (?, ?, ?)
+       ON CONFLICT(book_history_id, session_date) DO UPDATE SET
+         duration_ms = duration_ms + excluded.duration_ms`,
+      [bookHistoryId, additionalMs, today]
+    );
+  });
 }
 
 export async function getTotalListeningTimeForBook(bookHistoryId: number): Promise<number> {
-  const database = await getDatabase();
-  const result = await database.getFirstAsync<{ total: number }>(
-    `SELECT COALESCE(SUM(duration_ms), 0) as total FROM listening_sessions WHERE book_history_id = ?`,
-    [bookHistoryId]
-  );
-  return result?.total ?? 0;
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const result = await database.getFirstAsync<{ total: number }>(
+      `SELECT COALESCE(SUM(duration_ms), 0) as total FROM listening_sessions WHERE book_history_id = ?`,
+      [bookHistoryId]
+    );
+    return result?.total ?? 0;
+  });
 }
 
 export async function getTotalListeningTime(): Promise<number> {
-  const database = await getDatabase();
-  const result = await database.getFirstAsync<{ total: number }>(
-    `SELECT COALESCE(SUM(duration_ms), 0) as total FROM listening_sessions`
-  );
-  return result?.total ?? 0;
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const result = await database.getFirstAsync<{ total: number }>(
+      `SELECT COALESCE(SUM(duration_ms), 0) as total FROM listening_sessions`
+    );
+    return result?.total ?? 0;
+  });
 }
 
 export async function getCompletionsPerMonth(year?: number): Promise<{ month: string; count: number }[]> {
-  const database = await getDatabase();
-  let query = `SELECT strftime('%Y-%m', completed_at) as month, COUNT(*) as count
-               FROM book_history WHERE completed_at IS NOT NULL`;
-  const params: number[] = [];
-  if (year) {
-    query += ` AND strftime('%Y', completed_at) = ?`;
-    params.push(year);
-  }
-  query += ` GROUP BY month ORDER BY month`;
-  return await database.getAllAsync<{ month: string; count: number }>(query, params.map(String));
+  return withRetry(async () => {
+    const database = await getDatabase();
+    let query = `SELECT strftime('%Y-%m', completed_at) as month, COUNT(*) as count
+                 FROM book_history WHERE completed_at IS NOT NULL`;
+    const params: number[] = [];
+    if (year) {
+      query += ` AND strftime('%Y', completed_at) = ?`;
+      params.push(year);
+    }
+    query += ` GROUP BY month ORDER BY month`;
+    return await database.getAllAsync<{ month: string; count: number }>(query, params.map(String));
+  });
 }
 
 export async function getDailyListeningStats(year?: number, month?: number): Promise<{ date: string; duration_ms: number }[]> {
-  const database = await getDatabase();
-  let query = `SELECT session_date as date, SUM(duration_ms) as duration_ms
-               FROM listening_sessions WHERE 1=1`;
-  const params: string[] = [];
-  if (year) {
-    query += ` AND strftime('%Y', session_date) = ?`;
-    params.push(String(year));
-  }
-  if (month) {
-    query += ` AND strftime('%m', session_date) = ?`;
-    params.push(String(month).padStart(2, "0"));
-  }
-  query += ` GROUP BY session_date ORDER BY session_date`;
-  return await database.getAllAsync<{ date: string; duration_ms: number }>(query, params);
+  return withRetry(async () => {
+    const database = await getDatabase();
+    let query = `SELECT session_date as date, SUM(duration_ms) as duration_ms
+                 FROM listening_sessions WHERE 1=1`;
+    const params: string[] = [];
+    if (year) {
+      query += ` AND strftime('%Y', session_date) = ?`;
+      params.push(String(year));
+    }
+    if (month) {
+      query += ` AND strftime('%m', session_date) = ?`;
+      params.push(String(month).padStart(2, "0"));
+    }
+    query += ` GROUP BY session_date ORDER BY session_date`;
+    return await database.getAllAsync<{ date: string; duration_ms: number }>(query, params);
+  });
 }
 
 export async function getFilteredBookHistory(year?: number, month?: number): Promise<BookHistory[]> {
-  const database = await getDatabase();
-  let query = `SELECT * FROM book_history WHERE 1=1`;
-  const params: string[] = [];
-  if (year) {
-    query += ` AND strftime('%Y', started_at) = ?`;
-    params.push(String(year));
-  }
-  if (month) {
-    query += ` AND strftime('%m', started_at) = ?`;
-    params.push(String(month).padStart(2, "0"));
-  }
-  query += ` ORDER BY started_at DESC`;
-  return await database.getAllAsync<BookHistory>(query, params);
+  return withRetry(async () => {
+    const database = await getDatabase();
+    let query = `SELECT * FROM book_history WHERE 1=1`;
+    const params: string[] = [];
+    if (year) {
+      query += ` AND strftime('%Y', started_at) = ?`;
+      params.push(String(year));
+    }
+    if (month) {
+      query += ` AND strftime('%m', started_at) = ?`;
+      params.push(String(month).padStart(2, "0"));
+    }
+    query += ` ORDER BY started_at DESC`;
+    return await database.getAllAsync<BookHistory>(query, params);
+  });
 }
