@@ -28,16 +28,22 @@ book-player-2/
     +not-found.tsx        # 404 fallback
   services/
     database.ts           # SQLite schema, queries, and data access
-    audioContext.tsx       # React Context for audio state + TrackPlayer
-    playbackService.ts    # Background playback event handlers
+    audioContext.tsx      # React Context for audio state + TrackPlayer
+    playbackService.ts    # Sole remote/background playback event handler
     scanner.ts            # File import (SAF on Android, local copy on iOS)
+    sync.ts               # Library sync pass (import/reconcile/hide on disk changes)
   components/
-    BookHistoryRow.tsx     # Shared book row component for analytics lists
+    BookHistoryRow.tsx    # Shared book row component for analytics lists
+    BookCover.tsx         # Cover image with book-icon fallback
+    NotFoundScreen.tsx    # Shared "not found" fallback screen
   constants/
     theme.ts              # Color palette
     styles.ts             # Shared styles (container, header, coverImage)
+    playback.ts           # SKIP_SECONDS (shared by UI + remote handler)
   utils/
     format.ts             # Shared formatting (duration, time, date, daysBetween)
+    error.ts              # getErrorMessage helper
+    sort.ts               # naturalCompare helper
 ```
 
 ## Data Flow
@@ -61,8 +67,8 @@ Progress saves automatically
   -> Listening time tracked and flushed to listening_sessions
 
 Remote controls (lock screen, headphones)
-  -> playbackService.ts handles background events
-  -> audioContext.tsx handles foreground events via useTrackPlayerEvents
+  -> playbackService.ts is the single handler (registered with TrackPlayer)
+  -> audioContext UI state stays in sync via usePlaybackState / useProgress
 ```
 
 ## Key Design Decisions

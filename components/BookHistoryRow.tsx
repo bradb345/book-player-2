@@ -1,8 +1,9 @@
-import { View, Text, StyleSheet, Pressable, Image } from "react-native";
+import { View, Text, StyleSheet, Pressable } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/theme";
 import { BookHistory } from "@/services/database";
 import { formatDate, daysBetween } from "@/utils/format";
+import { BookCover } from "@/components/BookCover";
 
 interface BookHistoryRowProps {
   book: BookHistory;
@@ -15,11 +16,7 @@ export function BookHistoryRow({ book, onPress }: BookHistoryRowProps) {
   return (
     <Pressable style={styles.bookRow} onPress={onPress}>
       <View style={styles.bookCover}>
-        {book.cover_path ? (
-          <Image source={{ uri: book.cover_path }} style={styles.coverImage} />
-        ) : (
-          <Ionicons name="book" size={24} color={colors.lightGrey} />
-        )}
+        <BookCover coverPath={book.cover_path} iconSize={24} />
       </View>
       <View style={styles.bookInfo}>
         <View style={styles.bookTitleRow}>
@@ -59,11 +56,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     overflow: "hidden",
-  },
-  coverImage: {
-    width: "100%",
-    height: "100%",
-    resizeMode: "cover",
   },
   bookInfo: {
     flex: 1,

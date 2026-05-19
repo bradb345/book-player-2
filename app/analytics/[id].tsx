@@ -6,7 +6,6 @@ import {
   Pressable,
   StatusBar,
   ScrollView,
-  Image,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
@@ -19,6 +18,8 @@ import {
   getTotalListeningTimeForBook,
 } from "@/services/database";
 import { formatDuration, formatDate, daysBetween } from "@/utils/format";
+import { BookCover } from "@/components/BookCover";
+import { NotFoundScreen } from "@/components/NotFoundScreen";
 
 export default function BookAnalyticsScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -43,15 +44,7 @@ export default function BookAnalyticsScreen() {
   );
 
   if (!book) {
-    return (
-      <View style={[sharedStyles.container, sharedStyles.centered]}>
-        <StatusBar barStyle="light-content" />
-        <Text style={styles.emptyText}>Book not found</Text>
-        <Pressable style={styles.backButtonLarge} onPress={() => router.back()}>
-          <Text style={styles.backButtonText}>Go Back</Text>
-        </Pressable>
-      </View>
-    );
+    return <NotFoundScreen message="Book not found" />;
   }
 
   const isCompleted = book.completed_at !== null;
@@ -81,11 +74,7 @@ export default function BookAnalyticsScreen() {
         {/* Book Info */}
         <View style={styles.bookHeader}>
           <View style={styles.coverLarge}>
-            {book.cover_path ? (
-              <Image source={{ uri: book.cover_path }} style={sharedStyles.coverImage} />
-            ) : (
-              <Ionicons name="book" size={60} color={colors.lightGrey} />
-            )}
+            <BookCover coverPath={book.cover_path} iconSize={60} />
           </View>
           <Text style={styles.bookTitle}>{book.title}</Text>
           {book.author && <Text style={styles.bookAuthor}>{book.author}</Text>}
@@ -153,22 +142,6 @@ export default function BookAnalyticsScreen() {
 }
 
 const styles = StyleSheet.create({
-  emptyText: {
-    fontSize: 16,
-    color: colors.lightGrey,
-    marginBottom: 16,
-  },
-  backButtonLarge: {
-    backgroundColor: colors.mediumGrey,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 8,
-  },
-  backButtonText: {
-    color: colors.white,
-    fontSize: 16,
-    fontWeight: "600",
-  },
   content: {
     paddingHorizontal: 16,
   },

@@ -39,9 +39,9 @@ The central audio state manager, exposed as a React Context via `AudioProvider` 
 
 ## PlaybackService (`services/playbackService.ts`)
 
-Registered with `react-native-track-player` as the background playback handler. Listens for remote control events (lock screen, headphones, notification) and forwards them to TrackPlayer.
+Registered with `react-native-track-player` as the background playback handler, and the **single** place remote control events (lock screen, headphones, notification) are handled — `AudioContext` deliberately does not also handle them (doing so double-fired jump/skip). The UI stays in sync because `AudioContext` observes the resulting player state via `usePlaybackState` / `useProgress`.
 
-Handled events: RemotePlay, RemotePause, RemoteStop, RemoteNext, RemotePrevious, RemoteSeek, RemoteJumpForward (+30s), RemoteJumpBackward (-30s).
+Handled events: RemotePlay, RemotePause, RemoteStop, RemoteNext, RemotePrevious, RemoteSeek, RemoteJumpForward (+`SKIP_SECONDS`), RemoteJumpBackward (−`SKIP_SECONDS`). `SKIP_SECONDS` lives in `constants/playback.ts`, shared with the player UI and `TrackPlayer.updateOptions`.
 
 ## Scanner (`services/scanner.ts`)
 
@@ -64,7 +64,22 @@ Handles audiobook discovery and import from user-selected folders.
 
 ### Platform Differences
 - **Android (SAF)**: Plays audio directly from `content://` URIs. No file copying.
-- **iOS (Local)**: Copies audio files into `{documentDirectory}/audiobooks/book_{id}/` for reliable playback access.
+- **iOS (Local)**: `pickAudiobooksFolder()` uses `@react-native-documents/picker` `pickDirectory({ requestLongTermAccess: true })`, which holds the iOS security scope for the app process across the picker call. `scanAndImportFolder()` then enumerates the tree with `expo-file-system` and copies every audio file into `{documentDirectory}/audiobooks/book_{id}/`, then calls `releaseSecureAccess()`. Because playback uses the copies, the bookmark isn't persisted — so iOS rescan/sync of an already-added folder can't see new files (the original scope is gone). This is the same "iOS sync is a follow-up" limitation noted below.
+
+## Sync (`services/sync.ts`)
+
+`syncLibrary()` keeps the DB in step with what's on disk (modeled on Voice's
+MediaScanner). Triggered on home-screen focus and pull-to-refresh:
+
+- Imports brand-new book folders (the scan is idempotent).
+- Reconciles existing SAF books whose chapter files changed (add/remove
+  chapters while preserving playback progress).
+- Hides books whose folders/files vanished (`is_active = 0`) instead of
+  deleting them, and restores them if the files come back.
+- One-time repair of titles mangled by the old SAF URI-decoding bug.
+
+Scope is the Android/SAF "no-copy" model where `chapters.file_path` is the real
+source URI and can be diffed against the filesystem; iOS sync is a follow-up.
 
 ## Database (`services/database.ts`)
 

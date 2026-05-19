@@ -29,6 +29,7 @@ import {
   getBookTitleFromPath,
   AUDIO_EXTENSIONS,
 } from "./scanner";
+import { naturalCompare } from "@/utils/sort";
 
 export interface SyncResult {
   imported: number;
@@ -36,10 +37,6 @@ export interface SyncResult {
   deactivated: number;
   updatedBooks: number;
   message: string;
-}
-
-function naturalCompare(a: string, b: string): number {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
 
 // One-time cleanup: fix titles mangled by the old SAF URI-decoding bug

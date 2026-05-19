@@ -1,4 +1,5 @@
 import * as SQLite from "expo-sqlite";
+import { getErrorMessage } from "@/utils/error";
 
 export interface Book {
   id: number;
@@ -56,7 +57,7 @@ export interface ListeningSession {
 let db: SQLite.SQLiteDatabase | null = null;
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
-export function resetDatabase(): void {
+function resetDatabase(): void {
   db = null;
   dbPromise = null;
 }
@@ -110,7 +111,7 @@ export async function withRetry<T>(operation: () => Promise<T>): Promise<T> {
       await getDatabase();
       return await operation();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       if (msg.includes("NullPointerException") || msg.includes("NativeDatabase")) {
         resetDatabase();
         await getDatabase();
@@ -549,13 +550,6 @@ export async function updateBookTitle(bookId: number, title: string): Promise<vo
   return withRetry(async () => {
     const database = await getDatabase();
     await database.runAsync(`UPDATE books SET title = ? WHERE id = ?`, [title, bookId]);
-  });
-}
-
-export async function updateBookAuthor(bookId: number, author: string | null): Promise<void> {
-  return withRetry(async () => {
-    const database = await getDatabase();
-    await database.runAsync(`UPDATE books SET author = ? WHERE id = ?`, [author, bookId]);
   });
 }
 
