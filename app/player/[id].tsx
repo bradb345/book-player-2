@@ -6,8 +6,6 @@ import {
   Pressable,
   StatusBar,
   ActivityIndicator,
-  Alert,
-  Image,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -19,8 +17,10 @@ import { sharedStyles } from "@/constants/styles";
 import { useAudio } from "@/services/audioContext";
 import { getBookHistoryByBookId } from "@/services/database";
 import { formatPlaybackTime } from "@/utils/format";
+import { SKIP_SECONDS } from "@/constants/playback";
+import { BookCover } from "@/components/BookCover";
+import { NotFoundScreen } from "@/components/NotFoundScreen";
 
-const SKIP_SECONDS = 30;
 const MIN_SPEED = 0.5;
 const MAX_SPEED = 3.0;
 
@@ -102,15 +102,7 @@ export default function PlayerScreen() {
   }
 
   if (!book) {
-    return (
-      <View style={[sharedStyles.container, sharedStyles.centered]}>
-        <StatusBar barStyle="light-content" />
-        <Text style={styles.errorText}>Book not found</Text>
-        <Pressable style={styles.backButtonLarge} onPress={() => router.back()}>
-          <Text style={styles.backButtonText}>Go Back</Text>
-        </Pressable>
-      </View>
-    );
+    return <NotFoundScreen message="Book not found" />;
   }
 
   return (
@@ -149,13 +141,7 @@ export default function PlayerScreen() {
       {/* Book Cover */}
       <View style={styles.coverContainer}>
         <View style={styles.cover}>
-          {isLoading ? (
-            <ActivityIndicator size="large" color={colors.lightGrey} />
-          ) : book.cover_path ? (
-            <Image source={{ uri: book.cover_path }} style={sharedStyles.coverImage} />
-          ) : (
-            <Ionicons name="book" size={80} color={colors.lightGrey} />
-          )}
+          <BookCover coverPath={book.cover_path} iconSize={80} loading={isLoading} />
         </View>
       </View>
 
@@ -313,22 +299,6 @@ export default function PlayerScreen() {
 }
 
 const styles = StyleSheet.create({
-  errorText: {
-    fontSize: 16,
-    color: colors.lightGrey,
-    marginBottom: 16,
-  },
-  backButtonLarge: {
-    backgroundColor: colors.mediumGrey,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 8,
-  },
-  backButtonText: {
-    color: colors.white,
-    fontSize: 16,
-    fontWeight: "600",
-  },
   header: {
     flexDirection: "row",
     alignItems: "center",

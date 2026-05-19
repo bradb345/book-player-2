@@ -44,7 +44,7 @@ Manage audiobook source folders.
 - "Rescan All" button to check all sources for new books
 - "Add Folder" button to pick a new source
   - Android: SAF directory picker
-  - iOS: Document picker (selects a file, infers parent directory)
+  - iOS: native directory picker (`@react-native-documents/picker` `pickDirectory`); the whole folder tree is copied into app storage on import
 - Info box explaining multi-folder support and skip-if-exists behavior
 
 ## Analytics Dashboard (`app/analytics/index.tsx`)

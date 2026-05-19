@@ -9,7 +9,6 @@ import {
   Modal,
   TextInput,
   Alert,
-  Image,
   RefreshControl,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -30,6 +29,8 @@ import {
 import { deleteBookFiles } from "@/services/scanner";
 import { syncLibrary } from "@/services/sync";
 import { useAudio } from "@/services/audioContext";
+import { BookCover } from "@/components/BookCover";
+import { getErrorMessage } from "@/utils/error";
 
 interface BookWithProgress extends Book {
   progress: ProgressWithCumulative | null;
@@ -218,10 +219,9 @@ export default function HomeScreen() {
 
                   loadBooks();
                 } catch (error) {
-                  const errorMessage = error instanceof Error ? error.message : String(error);
                   Alert.alert(
                     "Error",
-                    `Failed to remove "${bookTitle}": ${errorMessage}`
+                    `Failed to remove "${bookTitle}": ${getErrorMessage(error)}`
                   );
                 }
               },
@@ -260,11 +260,7 @@ export default function HomeScreen() {
         delayLongPress={300}
       >
         <View style={styles.listCover}>
-          {item.cover_path ? (
-            <Image source={{ uri: item.cover_path }} style={sharedStyles.coverImage} />
-          ) : (
-            <Ionicons name="book" size={28} color={colors.lightGrey} />
-          )}
+          <BookCover coverPath={item.cover_path} iconSize={28} />
         </View>
         <View style={styles.listInfo}>
           <Text style={styles.listTitle} numberOfLines={1}>

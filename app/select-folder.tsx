@@ -81,6 +81,12 @@ export default function SelectFolderScreen() {
       setStatus(result.message);
       setIsScanning(false);
       setIsLoading(false);
+
+      // Folder imported successfully — return to the library, which reloads
+      // its book list on focus and so will show the newly imported books.
+      if (result.success) {
+        router.back();
+      }
     } catch (error) {
       setStatus(`Error: ${error}`);
       setIsScanning(false);

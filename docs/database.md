@@ -84,5 +84,9 @@ Used on the home screen to show overall book progress. Sums durations of all cha
 ### Upsert listening session
 Uses `INSERT ... ON CONFLICT DO UPDATE SET duration_ms = duration_ms + excluded.duration_ms` to accumulate listening time throughout the day.
 
-### Backfill book history
-On database initialization, any books without a corresponding `book_history` row get one created automatically. This handles the migration for books imported before the analytics feature.
+## Initialization Migrations
+
+`initializeDatabase()` runs two idempotent maintenance steps on every open:
+
+- **Prune stale history**: deletes `book_history` rows with no `listening_sessions` — cleans up rows left by an earlier backfill that were never actually played.
+- **`books.is_active` column**: added via `ALTER TABLE` if missing (SQLite has no `ADD COLUMN IF NOT EXISTS`). Inactive books are ones whose source files vanished on a sync pass; they are hidden from the library but kept (with progress + history) so they reappear if the files come back.

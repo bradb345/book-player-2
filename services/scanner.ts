@@ -1,12 +1,14 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { StorageAccessFramework } from "expo-file-system/legacy";
-import * as DocumentPicker from "expo-document-picker";
 import { Platform } from "react-native";
 import {
   insertBook,
   insertChapter,
   bookExistsAtPath,
+  deleteBook,
 } from "./database";
+import { getErrorMessage } from "@/utils/error";
+import { naturalCompare } from "@/utils/sort";
 
 export const AUDIO_EXTENSIONS = [".mp3", ".m4a", ".m4b", ".aac", ".wav", ".flac", ".ogg"];
 const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"];
@@ -19,17 +21,6 @@ const COMPANION_FILE_EXTENSIONS = [
   ".xml", ".lrc", ".srt", ".vtt", ".db", ".ini", ".sfv", ".md5", ".epub",
 ];
 const COVER_FILENAMES = ["cover", "folder", "front", "album", "artwork"];
-const AUDIO_MIME_TYPES = [
-  "audio/mpeg",
-  "audio/mp4",
-  "audio/x-m4a",
-  "audio/x-m4b",
-  "audio/aac",
-  "audio/wav",
-  "audio/flac",
-  "audio/ogg",
-  "audio/*",
-];
 
 interface ScannedFile {
   name: string;
@@ -153,10 +144,6 @@ function getChapterTitleFromFilename(filename: string): string {
   return decoded;
 }
 
-function naturalSort(a: string, b: string): number {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
-}
-
 function getParentDirectory(uri: string): string {
   // Remove trailing slash if present
   const cleanUri = uri.endsWith("/") ? uri.slice(0, -1) : uri;
@@ -171,16 +158,23 @@ function getFolderName(uri: string): string {
   return lastUriSegment(uri) || uri;
 }
 
+// Join a child name onto a directory URI.
+//
+// `pickDirectory` returns a percent-encoded file:// URI that ends with a
+// slash (e.g. ".../File%20Provider%20Storage/Books/"), while
+// FileSystem.readDirectoryAsync returns *decoded* names ("Take Me to Your
+// Leader.m4b"). Naively doing `${dir}/${name}` produced a double slash and a
+// mixed-encoding path that expo-file-system can't read ("is not readable").
+// Strip trailing slashes from the base and percent-encode the appended
+// segment so the whole URI stays consistently encoded — which is what the
+// expo-file-system calls (getInfoAsync/readDirectoryAsync/copyAsync) expect.
+function joinUri(baseUri: string, segment: string): string {
+  return `${baseUri.replace(/\/+$/, "")}/${encodeURIComponent(segment)}`;
+}
+
 function sanitizeFilename(filename: string): string {
   // Remove or replace characters that might cause issues
   return filename.replace(/[<>:"/\\|?*]/g, "_");
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
 }
 
 async function getUniqueFilename(directory: string, filename: string): Promise<string> {
@@ -214,6 +208,28 @@ async function getUniqueFilename(directory: string, filename: string): Promise<s
   }
 }
 
+// @react-native-documents/picker is a native TurboModule, used only by the
+// iOS folder picker. We load it lazily instead of with a top-level import so
+// that a dev client built before this dependency was added (or any binary/JS
+// version skew) degrades to "iOS folder picking unavailable" rather than
+// throwing at module-eval time — which would take down every screen that
+// transitively imports this file (the home route does). Android never calls
+// it (it uses StorageAccessFramework), so on Android this is never invoked.
+type DocumentPickerModule = typeof import("@react-native-documents/picker");
+
+function loadDocumentPicker(): DocumentPickerModule | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require("@react-native-documents/picker");
+  } catch (e) {
+    console.warn(
+      "@react-native-documents/picker native module unavailable — rebuild the dev client (npx expo run:ios). iOS folder picking is disabled.",
+      e
+    );
+    return null;
+  }
+}
+
 export async function pickAudiobooksFolder(): Promise<PickResult | null> {
   try {
     if (Platform.OS === "android" && StorageAccessFramework) {
@@ -228,22 +244,52 @@ export async function pickAudiobooksFolder(): Promise<PickResult | null> {
       const folderName = getFolderName(decodeURIComponent(folderUri));
 
       return { folderUri, folderName };
-    } else {
-      // iOS: Use document picker to select an audio file, then use parent directory
-      const result = await DocumentPicker.getDocumentAsync({
-        type: AUDIO_MIME_TYPES,
-        copyToCacheDirectory: false,
+    }
+
+    // iOS: real directory picker (UIDocumentPickerViewController for opening
+    // a folder). Unlike the old "pick a file, guess the parent" hack, this
+    // grants access to the whole folder tree — so a folder containing both a
+    // loose audio file and a sub-folder of chapters imports as two books.
+    //
+    // requestLongTermAccess keeps the iOS security scope held for the app
+    // process (not just this module) after the picker returns, so the
+    // expo-file-system scan in scanAndImportFolder can read the tree. We
+    // copy everything into app storage during that scan; we never persist
+    // the bookmark, and we never explicitly release the scope (doing so
+    // crashes the app — see scanAndImportFolder). iOS reclaims the
+    // process-scoped handle automatically when the process exits.
+    const picker = loadDocumentPicker();
+    if (!picker) {
+      return null;
+    }
+
+    try {
+      // Use the library's default presentation (pageSheet). Forcing
+      // "fullScreen" on UIDocumentPickerViewController (an out-of-process
+      // remote view controller) is a known cause of the host app being
+      // terminated when the picker is dismissed.
+      const result = await picker.pickDirectory({
+        requestLongTermAccess: true,
       });
 
-      if (result.canceled || !result.assets || result.assets.length === 0) {
-        return null;
+      if ("bookmarkStatus" in result && result.bookmarkStatus === "error") {
+        // No long-term bookmark, but the transient scope from the pick is
+        // still active — enough for the immediate scan-and-copy below.
+        console.warn("pickDirectory bookmark error:", result.bookmarkError);
       }
 
-      const fileUri = result.assets[0].uri;
-      const parentDir = getParentDirectory(fileUri);
-      const folderName = getFolderName(parentDir);
+      const folderUri = result.uri;
+      const folderName = getFolderName(decodeURIComponent(folderUri));
 
-      return { folderUri: parentDir, folderName };
+      return { folderUri, folderName };
+    } catch (error) {
+      if (
+        picker.isErrorWithCode(error) &&
+        error.code === picker.errorCodes.OPERATION_CANCELED
+      ) {
+        return null;
+      }
+      throw error;
     }
   } catch (error) {
     console.error("Error picking folder:", error);
@@ -258,9 +304,26 @@ export async function scanAndImportFolder(folderUri: string): Promise<ImportResu
 
     if (isAndroidSAF && StorageAccessFramework) {
       return await scanAndImportSAFFolder(folderUri);
-    } else {
-      return await scanAndImportLocalFolder(folderUri);
     }
+
+    // iOS: scan + copy the picked directory tree into app storage while the
+    // security scope from pickDirectory is still held. The copies are what
+    // playback uses, so the original location isn't needed afterward.
+    //
+    // We deliberately do NOT call picker.releaseSecureAccess() here. In
+    // @react-native-documents/picker 12.0.1 that native call
+    // (stopAccessingOpenedUrls -> stopAccessingSecurityScopedResource on the
+    // File Provider directory URL, run off the main thread under the New
+    // Architecture) hard-crashes the app with no JS error — and a native
+    // crash can't be caught by a JS try/catch. It only fires AFTER the
+    // scan+copy has fully completed, which is why imported books still show
+    // up on the next launch. Since every file is already copied into the app
+    // sandbox and we never persist the long-term bookmark, the security
+    // scope is throwaway: iOS reclaims it automatically when the process
+    // exits. Skipping the release leaks one process-scoped handle per import
+    // (harmless for occasional imports) and removes the crash.
+    const res = await scanAndImportLocalFolder(folderUri);
+    return res;
   } catch (error) {
     console.error("Error scanning folder:", error);
     return { success: false, booksImported: 0, message: `Error scanning folder: ${getErrorMessage(error)}` };
@@ -372,7 +435,7 @@ async function scanAndImportLocalFolder(folderUri: string): Promise<ImportResult
   const subdirectories: string[] = [];
 
   for (const item of contents) {
-    const itemUri = `${folderUri}/${item}`;
+    const itemUri = joinUri(folderUri, item);
     const itemInfo = await FileSystem.getInfoAsync(itemUri);
 
     if (itemInfo.isDirectory) {
@@ -438,12 +501,6 @@ function getFilenameFromUri(uri: string): string {
   return filename?.trim() || "";
 }
 
-// For SAF URIs, we don't copy - just use the URI directly
-// The SAF permissions are persistent and expo-av can play from content:// URIs
-function getFileUriForSAF(sourceUri: string): string {
-  return sourceUri;
-}
-
 async function copyFileLocal(
   sourceUri: string,
   bookId: number,
@@ -453,25 +510,57 @@ async function copyFileLocal(
   const safeFilename = await getUniqueFilename(bookDir, filename);
   const destUri = `${bookDir}${safeFilename}`;
 
-  console.log(`Copying file from ${sourceUri} to ${destUri}`);
+  // The source lives in a security-scoped File Provider location (the picked
+  // directory tree). expo-file-system doesn't own that scope, so reading it
+  // with copyAsync fails on small files and silently kills the app (iOS
+  // Jetsam) on large ones. keepLocalCopy does the read inside the picker's
+  // native module — which holds the long-term scope and materializes iCloud
+  // / File Provider files — dropping a copy in app storage. We then move it
+  // into the book folder: a cheap in-sandbox rename that needs no scope.
+  const picker = loadDocumentPicker();
+  if (!picker) {
+    throw new Error("Document picker unavailable; cannot import audiobook file.");
+  }
 
-  await FileSystem.copyAsync({
-    from: sourceUri,
-    to: destUri,
+  // Unique transient name in Documents so a duplicate basename or leftover
+  // from an earlier failed run can't collide before the move consumes it.
+  const tempName = `import_${bookId}_${Date.now()}_${sanitizeFilename(filename)}`;
+  const [copied] = await picker.keepLocalCopy({
+    destination: "documentDirectory",
+    files: [{ uri: sourceUri, fileName: tempName }],
   });
 
-  console.log(`File copied successfully to ${destUri}`);
+  if (copied.status !== "success") {
+    throw new Error(`keepLocalCopy failed for ${filename}: ${copied.copyError}`);
+  }
+
+  await FileSystem.moveAsync({ from: copied.localUri, to: destUri });
+
   return destUri;
 }
 
 // Resolves a source file URI to a playable URI.
-// SAF (Android): uses the content:// URI directly.
+// SAF (Android): uses the content:// URI directly — SAF permissions are
+// persistent and the player can stream from content:// URIs, so no copy.
 // Local (iOS): copies the file to app storage.
 type FileResolver = (sourceUri: string, bookId: number, filename: string) => Promise<string>;
 
-const safResolver: FileResolver = async (sourceUri) => getFileUriForSAF(sourceUri);
+const safResolver: FileResolver = async (sourceUri) => sourceUri;
 const localResolver: FileResolver = async (sourceUri, bookId, filename) =>
   copyFileLocal(sourceUri, bookId, filename);
+
+// Roll back a book whose chapters couldn't be fully inserted, so a failed or
+// partial import never leaves an orphan (a book row with missing chapters
+// that renders broken in the library). deleteBook cascades to chapters
+// (FK ON DELETE CASCADE); deleteBookFiles clears any iOS copies.
+async function cleanupFailedBook(bookId: number): Promise<void> {
+  try {
+    await deleteBook(bookId);
+  } catch (e) {
+    console.warn("Failed to roll back partial book:", e);
+  }
+  await deleteBookFiles(bookId).catch(() => {});
+}
 
 async function importBookFromDirectory(
   audioFiles: ScannedFile[],
@@ -482,11 +571,10 @@ async function importBookFromDirectory(
 ): Promise<boolean> {
   try {
     if (await bookExistsAtPath(directoryUri)) {
-      console.log("Book already exists:", directoryUri);
       return false;
     }
 
-    audioFiles.sort((a, b) => naturalSort(a.sortKey ?? a.name, b.sortKey ?? b.name));
+    audioFiles.sort((a, b) => naturalCompare(a.sortKey ?? a.name, b.sortKey ?? b.name));
 
     if (audioFiles.length === 0) {
       return false;
@@ -498,14 +586,22 @@ async function importBookFromDirectory(
 
     const bookId = await insertBook(title, directoryUri, undefined, coverUri || undefined);
 
-    for (let i = 0; i < audioFiles.length; i++) {
-      const file = audioFiles[i];
-      const chapterTitle = getChapterTitleFromFilename(file.name);
-      const localUri = await resolveFile(file.uri, bookId, file.name);
-      await insertChapter(bookId, chapterTitle, localUri, i);
+    try {
+      for (let i = 0; i < audioFiles.length; i++) {
+        const file = audioFiles[i];
+        const chapterTitle = getChapterTitleFromFilename(file.name);
+        const localUri = await resolveFile(file.uri, bookId, file.name);
+        await insertChapter(bookId, chapterTitle, localUri, i);
+      }
+    } catch (error) {
+      // A chapter file is already imported (chapters.file_path is globally
+      // UNIQUE) or a file couldn't be copied. Roll back so we don't leave a
+      // half-imported book, and skip it rather than spamming an error.
+      console.warn(`Skipping "${title}" — could not import all chapters:`, error);
+      await cleanupFailedBook(bookId);
+      return false;
     }
 
-    console.log(`Book imported successfully: ${title}`);
     return true;
   } catch (error) {
     console.error("Error importing book from directory:", error);
@@ -520,10 +616,21 @@ async function importSingleFile(
   resolveFile: FileResolver,
 ): Promise<boolean> {
   try {
-    const uniquePath = `${originalFolderUri}/${file.name}`;
+    // Synthetic DB key (books.folder_path) for a loose file. This is a dedupe
+    // key only — never read from disk — so it must NOT be percent-encoded or
+    // otherwise reformatted: changing its shape makes bookExistsAtPath miss
+    // books imported by older builds and re-import them, colliding on the
+    // globally-UNIQUE chapters.file_path. (The real, readable source URI is
+    // file.uri, built correctly via joinUri during the scan.)
+    //
+    // Strip trailing slashes first: the iOS pickDirectory URI ends with "/",
+    // and older builds derived this base via getParentDirectory (no trailing
+    // slash). Without trimming we'd produce ".../Books//file.m4b" and miss
+    // those previously imported books. Trimming is shape-preserving (older
+    // builds never had the trailing slash); percent-encoding is still avoided.
+    const uniquePath = `${originalFolderUri.replace(/\/+$/, "")}/${file.name}`;
 
     if (await bookExistsAtPath(uniquePath)) {
-      console.log("Book already exists:", uniquePath);
       return false;
     }
 
@@ -531,10 +638,17 @@ async function importSingleFile(
     console.log(`Importing single file book: ${title}`);
 
     const bookId = await insertBook(title, uniquePath, undefined, coverUri || undefined);
-    const localUri = await resolveFile(file.uri, bookId, file.name);
-    await insertChapter(bookId, title, localUri, 0);
+    try {
+      const localUri = await resolveFile(file.uri, bookId, file.name);
+      await insertChapter(bookId, title, localUri, 0);
+    } catch (error) {
+      // File already imported (chapters.file_path UNIQUE) or unreadable —
+      // roll back the just-created book so it isn't left orphaned, and skip.
+      console.warn(`Skipping "${title}" — could not import file:`, error);
+      await cleanupFailedBook(bookId);
+      return false;
+    }
 
-    console.log(`Book imported successfully: ${title}`);
     return true;
   } catch (error) {
     console.error("Error importing single file book:", error);
@@ -593,7 +707,7 @@ async function walkLocalTree(
 
   const contents = await FileSystem.readDirectoryAsync(directoryUri);
   for (const item of contents) {
-    const itemUri = `${directoryUri}/${item}`;
+    const itemUri = joinUri(directoryUri, item);
     const rel = relPrefix ? `${relPrefix}/${item}` : item;
     const info = await FileSystem.getInfoAsync(itemUri);
 
@@ -639,7 +753,6 @@ async function importBookFromSAFDirectory(directoryUri: string): Promise<boolean
 async function importBookFromLocalDirectory(directoryUri: string): Promise<boolean> {
   try {
     if (await bookExistsAtPath(directoryUri)) {
-      console.log("Book already exists:", directoryUri);
       return false;
     }
 
@@ -665,7 +778,6 @@ export async function deleteBookFiles(bookId: number): Promise<void> {
 
     if (dirInfo.exists) {
       await FileSystem.deleteAsync(bookDir, { idempotent: true });
-      console.log(`Deleted copied book files from app storage: ${bookDir}`);
     }
   } catch (error) {
     console.error("Error deleting book files:", error);

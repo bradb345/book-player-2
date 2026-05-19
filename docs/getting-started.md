@@ -3,9 +3,12 @@
 ## Prerequisites
 
 - Node.js 18+
-- Expo CLI (`npx expo`)
 - Android Studio (for Android development) or Xcode (for iOS)
 - A physical device is recommended for audio playback testing
+
+> This app **cannot run in Expo Go** — it depends on the native
+> `react-native-track-player` module and `expo-dev-client`, so it always needs
+> a custom dev build (`npm run ios` / `npm run android`).
 
 ## Setup
 
@@ -13,12 +16,12 @@
 # Install dependencies
 npm install
 
-# Start the dev server
-npm start
-
-# Run on a specific platform
+# Build & run a dev client on a connected device/simulator
 npm run android
 npm run ios
+
+# Start the Metro dev server for JS-only iteration (after a dev build exists)
+npm start
 ```
 
 ## Development
@@ -56,10 +59,9 @@ const { isPlaying, positionMs, durationMs } = state;
 | `npm run android` | Build and run on Android |
 | `npm run ios` | Build and run on iOS |
 | `npm run lint` | Run ESLint |
-| `npm run reset-project` | Reset to clean project state |
 
 ## Debugging
 
-- Audio playback issues: Check the console for `[AudioContext]` and `[PlaybackService]` log prefixes
+- Audio playback issues: errors are logged via `console.warn`/`console.error` from `services/audioContext.tsx`
 - Database issues: The SQLite database is stored as `audiobooks.db` in the app's document directory
-- Import issues: Scanner logs each step with `console.log` and `console.error`
+- Import issues: `services/scanner.ts` logs each imported book and reports failures with `console.error`

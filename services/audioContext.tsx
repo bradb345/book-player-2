@@ -23,6 +23,7 @@ import {
   updateBookHistoryDuration,
   upsertListeningSession,
 } from "./database";
+import { SKIP_SECONDS } from "@/constants/playback";
 
 interface AudioState {
   book: Book | null;
@@ -91,8 +92,8 @@ async function setupPlayer() {
         Capability.SkipToNext,
         Capability.SkipToPrevious,
       ],
-      forwardJumpInterval: 30,
-      backwardJumpInterval: 30,
+      forwardJumpInterval: SKIP_SECONDS,
+      backwardJumpInterval: SKIP_SECONDS,
       progressUpdateEventInterval: 1,
     });
     await TrackPlayer.setRepeatMode(RepeatMode.Off);
@@ -129,14 +130,11 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   // Playback state tracking via hook
   const playbackState = usePlaybackState();
   useEffect(() => {
-    console.log('[DEBUG] playbackState:', JSON.stringify(playbackState), 'State.Playing:', State.Playing, 'State.Buffering:', State.Buffering);
     if (isTransitioningRef.current) return;
 
     const playing =
       playbackState.state === State.Playing ||
       playbackState.state === State.Buffering;
-
-    console.log('[DEBUG] computed playing:', playing);
 
     setState((prev) => {
       if (prev.isPlaying === playing) return prev;
@@ -209,53 +207,11 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     }
   });
 
-  // Event: remote play/pause (notification widget, headphones, etc.)
-  useTrackPlayerEvents([Event.RemotePlay, Event.RemotePause, Event.RemoteStop,
-    Event.RemoteNext, Event.RemotePrevious, Event.RemoteJumpForward, Event.RemoteJumpBackward,
-    Event.RemoteSeek], async (event) => {
-    if (isTransitioningRef.current) return;
-
-    console.log('[AudioContext] Remote event received:', event.type);
-    switch (event.type) {
-      case Event.RemotePlay:
-        console.log('[AudioContext] Handling RemotePlay');
-        await TrackPlayer.play();
-        setState((prev) => ({ ...prev, isPlaying: true }));
-        break;
-      case Event.RemotePause:
-        console.log('[AudioContext] Handling RemotePause');
-        await TrackPlayer.pause();
-        setState((prev) => ({ ...prev, isPlaying: false }));
-        break;
-      case Event.RemoteStop:
-        await TrackPlayer.stop();
-        setState((prev) => ({ ...prev, isPlaying: false }));
-        break;
-      case Event.RemoteNext:
-        await TrackPlayer.skipToNext();
-        break;
-      case Event.RemotePrevious:
-        await TrackPlayer.skipToPrevious();
-        break;
-      case Event.RemoteJumpForward:
-        {
-          const { position } = await TrackPlayer.getProgress();
-          await TrackPlayer.seekTo(position + 30);
-        }
-        break;
-      case Event.RemoteJumpBackward:
-        {
-          const { position } = await TrackPlayer.getProgress();
-          await TrackPlayer.seekTo(Math.max(0, position - 30));
-        }
-        break;
-      case Event.RemoteSeek:
-        if ('position' in event) {
-          await TrackPlayer.seekTo((event as any).position);
-        }
-        break;
-    }
-  });
+  // Remote control events (lock screen, headphones, notification) are handled
+  // exclusively by the registered PlaybackService (services/playbackService.ts).
+  // Handling them here too made jump/skip events fire twice. The UI stays in
+  // sync because usePlaybackState (above) and useProgress (below) observe the
+  // resulting TrackPlayer state.
 
   // Event: queue ended (last chapter finished)
   useTrackPlayerEvents([Event.PlaybackQueueEnded], (event) => {
