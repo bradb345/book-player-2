@@ -6,6 +6,7 @@ import {
   Pressable,
   StatusBar,
   ScrollView,
+  Alert,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
@@ -16,10 +17,18 @@ import {
   BookHistory,
   getBookHistoryById,
   getTotalListeningTimeForBook,
+  deleteBookHistory,
 } from "@/services/database";
 import { formatDuration, formatDate, daysBetween } from "@/utils/format";
 import { BookCover } from "@/components/BookCover";
+import { ProgressRing } from "@/components/ProgressRing";
 import { NotFoundScreen } from "@/components/NotFoundScreen";
+
+interface StatRow {
+  label: string;
+  value: string;
+  green?: boolean;
+}
 
 export default function BookAnalyticsScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -57,6 +66,61 @@ export default function BookAnalyticsScreen() {
     return remaining > 0 ? remaining : null;
   })();
 
+  // Ring fill: a finished book is 100%; otherwise how much of the book has
+  // been listened to (capped at 100% in case of overlap/replays).
+  const progress = isCompleted
+    ? 1
+    : book.total_duration_ms > 0
+      ? Math.min(1, listeningTimeMs / book.total_duration_ms)
+      : 0;
+  const progressPercent = Math.round(progress * 100);
+
+  const rows: StatRow[] = [
+    { label: "Status", value: isCompleted ? "Completed" : "In Progress", green: isCompleted },
+    { label: "Time Listened", value: formatDuration(listeningTimeMs) },
+    { label: "Started", value: formatDate(book.started_at) },
+  ];
+  if (isCompleted) {
+    rows.push({ label: "Completed", value: formatDate(book.completed_at!) });
+    if (daysToFinish !== null) {
+      rows.push({
+        label: "Days to Finish",
+        value: `${daysToFinish} day${daysToFinish !== 1 ? "s" : ""}`,
+      });
+    }
+    if (book.total_duration_ms > 0) {
+      rows.push({ label: "Book Duration", value: formatDuration(book.total_duration_ms) });
+    }
+  } else {
+    rows.push({
+      label: "Est. Remaining",
+      value: estimatedRemaining ? formatDuration(estimatedRemaining) : "—",
+    });
+  }
+
+  const handleRemoveFromHistory = () => {
+    Alert.alert(
+      "Remove from History",
+      `Remove "${book.title}" from your listening history?\n\nThis only clears it from Analytics — the book's audio files in your folder are not deleted.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteBookHistory(book.id);
+              router.back();
+            } catch (e) {
+              console.error("Error removing book history:", e);
+              Alert.alert("Error", "Could not remove this entry. Please try again.");
+            }
+          },
+        },
+      ]
+    );
+  };
+
   return (
     <View style={sharedStyles.container}>
       <StatusBar barStyle="light-content" />
@@ -71,11 +135,13 @@ export default function BookAnalyticsScreen() {
       </View>
 
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 24 }]}>
-        {/* Book Info */}
-        <View style={styles.bookHeader}>
-          <View style={styles.coverLarge}>
-            <BookCover coverPath={book.cover_path} iconSize={60} />
-          </View>
+        {/* Hero: cover inside a progress ring */}
+        <View style={styles.hero}>
+          <ProgressRing progress={progress} size={180} strokeWidth={9}>
+            <View style={styles.coverCircle}>
+              <BookCover coverPath={book.cover_path} iconSize={56} />
+            </View>
+          </ProgressRing>
           <Text style={styles.bookTitle}>{book.title}</Text>
           {book.author && <Text style={styles.bookAuthor}>{book.author}</Text>}
           {!book.is_in_library && (
@@ -84,57 +150,31 @@ export default function BookAnalyticsScreen() {
               <Text style={styles.removedLabelText}>Removed from Library</Text>
             </View>
           )}
+          <Text style={styles.progressCaption}>
+            {isCompleted ? "Completed" : `${progressPercent}% complete`}
+          </Text>
         </View>
 
-        {/* Stats Grid */}
-        <View style={styles.statsGrid}>
-          <View style={styles.statCard}>
-            <Text style={styles.statLabel}>Started</Text>
-            <Text style={styles.statValue}>{formatDate(book.started_at)}</Text>
-          </View>
-          <View style={styles.statCard}>
-            <Text style={styles.statLabel}>Status</Text>
-            <Text style={[styles.statValue, isCompleted && styles.statValueGreen]}>
-              {isCompleted ? "Completed" : "In Progress"}
-            </Text>
-          </View>
-          <View style={styles.statCard}>
-            <Text style={styles.statLabel}>Time Listened</Text>
-            <Text style={styles.statValue}>{formatDuration(listeningTimeMs)}</Text>
-          </View>
-          <View style={styles.statCard}>
-            <Text style={styles.statLabel}>
-              {isCompleted ? "Time to Complete" : "Est. Remaining"}
-            </Text>
-            <Text style={styles.statValue}>
-              {isCompleted && daysToFinish
-                ? `${daysToFinish} day${daysToFinish !== 1 ? "s" : ""}`
-                : estimatedRemaining
-                  ? formatDuration(estimatedRemaining)
-                  : "—"}
-            </Text>
-          </View>
+        {/* Stats */}
+        <View style={styles.group}>
+          {rows.map((row, i) => (
+            <View
+              key={row.label}
+              style={[styles.statRow, i < rows.length - 1 && styles.rowDivider]}
+            >
+              <Text style={styles.statLabel}>{row.label}</Text>
+              <Text style={[styles.statValue, row.green && styles.statValueGreen]}>
+                {row.value}
+              </Text>
+            </View>
+          ))}
         </View>
 
-        {/* Completion Details */}
-        {isCompleted && (
-          <View style={styles.completionSection}>
-            <Text style={styles.sectionTitle}>Completion Details</Text>
-            <View style={styles.detailRow}>
-              <Text style={styles.detailLabel}>Completed</Text>
-              <Text style={styles.detailValue}>{formatDate(book.completed_at!)}</Text>
-            </View>
-            <View style={styles.detailRow}>
-              <Text style={styles.detailLabel}>Days to Finish</Text>
-              <Text style={styles.detailValue}>{daysToFinish}</Text>
-            </View>
-            {book.total_duration_ms > 0 && (
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Book Duration</Text>
-                <Text style={styles.detailValue}>{formatDuration(book.total_duration_ms)}</Text>
-              </View>
-            )}
-          </View>
+        {!book.is_in_library && (
+          <Pressable style={styles.removeButton} onPress={handleRemoveFromHistory}>
+            <Ionicons name="trash-outline" size={18} color={colors.red} />
+            <Text style={styles.removeButtonText}>Remove from History</Text>
+          </Pressable>
         )}
       </ScrollView>
     </View>
@@ -145,30 +185,26 @@ const styles = StyleSheet.create({
   content: {
     paddingHorizontal: 16,
   },
-  bookHeader: {
+  hero: {
     alignItems: "center",
+    marginTop: 8,
     marginBottom: 24,
   },
-  coverLarge: {
-    width: 140,
-    height: 140,
-    borderRadius: 16,
+  coverCircle: {
+    width: 138,
+    height: 138,
+    borderRadius: 69,
     backgroundColor: colors.mediumGrey,
     justifyContent: "center",
     alignItems: "center",
     overflow: "hidden",
-    marginBottom: 16,
-    shadowColor: colors.black,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
   },
   bookTitle: {
     fontSize: 22,
     fontWeight: "bold",
     color: colors.white,
     textAlign: "center",
+    marginTop: 16,
     marginBottom: 4,
   },
   bookAuthor: {
@@ -191,57 +227,52 @@ const styles = StyleSheet.create({
     color: colors.red,
     fontWeight: "500",
   },
-  statsGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-    marginBottom: 24,
+  progressCaption: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: colors.green,
+    marginTop: 12,
   },
-  statCard: {
-    width: "48%",
-    flexGrow: 1,
+  group: {
     backgroundColor: colors.mediumGrey,
-    borderRadius: 12,
-    padding: 14,
+    borderRadius: 16,
+    paddingHorizontal: 16,
+  },
+  statRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 15,
+  },
+  rowDivider: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "rgba(255,255,255,0.08)",
   },
   statLabel: {
-    fontSize: 12,
-    color: colors.lightGrey,
-    marginBottom: 4,
+    fontSize: 14,
+    color: colors.white,
   },
   statValue: {
-    fontSize: 17,
-    fontWeight: "600",
+    fontSize: 15,
+    fontWeight: "700",
     color: colors.white,
   },
   statValueGreen: {
-    color: "#34C759",
+    color: colors.green,
   },
-  completionSection: {
-    backgroundColor: colors.mediumGrey,
-    borderRadius: 12,
-    padding: 16,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: colors.white,
-    marginBottom: 12,
-  },
-  detailRow: {
+  removeButton: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    paddingVertical: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.darkGrey,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    marginTop: 24,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: colors.mediumGrey,
   },
-  detailLabel: {
-    fontSize: 14,
-    color: colors.lightGrey,
-  },
-  detailValue: {
-    fontSize: 14,
-    fontWeight: "500",
-    color: colors.white,
+  removeButtonText: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: colors.red,
   },
 });
