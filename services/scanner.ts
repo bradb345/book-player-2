@@ -515,8 +515,18 @@ async function copyFileLocal(
   // with copyAsync fails on small files and silently kills the app (iOS
   // Jetsam) on large ones. keepLocalCopy does the read inside the picker's
   // native module — which holds the long-term scope and materializes iCloud
-  // / File Provider files — dropping a copy in app storage. We then move it
+  // / File Provider files — dropping it in app storage. We then move that
   // into the book folder: a cheap in-sandbox rename that needs no scope.
+  //
+  // CRITICAL: upstream @react-native-documents/picker implements
+  // keepLocalCopy with FileManager.moveItem — it DELETES the source. Our
+  // source is the user's real file in the picked folder ("On My iPhone"),
+  // not a throwaway picker-inbox file, so a move destroys their library.
+  // patches/@react-native-documents+picker+12.0.1.patch swaps moveItem ->
+  // copyItem. The post-copy existence check below is the backstop: if the
+  // patch ever falls off (fresh clone without postinstall, version bump),
+  // we abort loudly after the first file instead of silently wiping the
+  // rest of the user's folder.
   const picker = loadDocumentPicker();
   if (!picker) {
     throw new Error("Document picker unavailable; cannot import audiobook file.");
@@ -532,6 +542,19 @@ async function copyFileLocal(
 
   if (copied.status !== "success") {
     throw new Error(`keepLocalCopy failed for ${filename}: ${copied.copyError}`);
+  }
+
+  // Backstop against the move-not-copy bug (see comment above): the source
+  // must still exist. If it's gone, the patch is not applied and we're
+  // actively destroying the user's files — fail now so cleanupFailedBook
+  // rolls back and the scan stops before more files are lost.
+  const sourceInfo = await FileSystem.getInfoAsync(sourceUri);
+  if (!sourceInfo.exists) {
+    throw new Error(
+      `Import aborted: source file was removed by keepLocalCopy (${filename}). ` +
+        `The @react-native-documents/picker move->copy patch is not applied — ` +
+        `run "npx patch-package" / reinstall pods before importing.`
+    );
   }
 
   await FileSystem.moveAsync({ from: copied.localUri, to: destUri });
