@@ -217,10 +217,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 4,
     marginTop: 8,
-    backgroundColor: colors.mediumGrey,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
   },
   removedLabelText: {
     fontSize: 13,
