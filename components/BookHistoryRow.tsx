@@ -8,13 +8,24 @@ import { BookCover } from "@/components/BookCover";
 interface BookHistoryRowProps {
   book: BookHistory;
   onPress: () => void;
+  /** Last row in its group — suppresses the bottom divider. */
+  isLast?: boolean;
 }
 
-export function BookHistoryRow({ book, onPress }: BookHistoryRowProps) {
+export function BookHistoryRow({ book, onPress, isLast }: BookHistoryRowProps) {
   const isCompleted = book.completed_at !== null;
 
   return (
-    <Pressable style={styles.bookRow} onPress={onPress}>
+    <Pressable
+      style={[styles.bookRow, !isLast && styles.divider]}
+      onPress={onPress}
+    >
+      <View
+        style={[
+          styles.statusDot,
+          { backgroundColor: isCompleted ? colors.green : colors.red },
+        ]}
+      />
       <View style={styles.bookCover}>
         <BookCover coverPath={book.cover_path} iconSize={24} />
       </View>
@@ -30,7 +41,7 @@ export function BookHistoryRow({ book, onPress }: BookHistoryRowProps) {
         {book.author && <Text style={styles.bookAuthor} numberOfLines={1}>{book.author}</Text>}
         <Text style={styles.bookMeta}>
           {isCompleted
-            ? `${formatDate(book.started_at)} — ${formatDate(book.completed_at!)} (${daysBetween(book.started_at, book.completed_at!)}d)`
+            ? `${formatDate(book.started_at)} — ${formatDate(book.completed_at!)} · ${daysBetween(book.started_at, book.completed_at!)}d`
             : `Started ${formatDate(book.started_at)}`}
         </Text>
       </View>
@@ -43,10 +54,17 @@ const styles = StyleSheet.create({
   bookRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: colors.mediumGrey,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 8,
+    paddingVertical: 12,
+  },
+  divider: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "rgba(255,255,255,0.08)",
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 12,
   },
   bookCover: {
     width: 44,

@@ -660,6 +660,19 @@ export async function markBookHistoryDeleted(bookId: number): Promise<void> {
   });
 }
 
+// Permanently delete a listening-history entry (and, via ON DELETE CASCADE,
+// its listening_sessions). Used to purge an already-removed book from the
+// Analytics list. Does not touch the books table or any audio files.
+export async function deleteBookHistory(bookHistoryId: number): Promise<void> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(
+      `DELETE FROM book_history WHERE id = ?`,
+      [bookHistoryId]
+    );
+  });
+}
+
 export async function updateBookHistoryDuration(bookHistoryId: number, totalDurationMs: number): Promise<void> {
   return withRetry(async () => {
     const database = await getDatabase();
