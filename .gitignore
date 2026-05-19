@@ -44,3 +44,8 @@ app-example
 # generated native folders
 /ios
 /android
+
+# local Expo modules: build output only (keep the module source)
+modules/*/android/build/
+modules/*/android/.cxx/
+modules/*/ios/build/

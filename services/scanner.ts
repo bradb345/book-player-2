@@ -6,7 +6,9 @@ import {
   insertChapter,
   bookExistsAtPath,
   deleteBook,
+  updateBookCover,
 } from "./database";
+import { extractEmbeddedCover, imageExtFromName } from "./coverArt";
 import { getErrorMessage } from "@/utils/error";
 import { naturalCompare } from "@/utils/sort";
 
@@ -617,6 +619,53 @@ async function cleanupFailedBook(bookId: number): Promise<void> {
   await deleteBookFiles(bookId).catch(() => {});
 }
 
+// Decide and persist a book's cover, in priority order:
+//   1. a sidecar image (cover.jpg / folder.png …) found next to the audio —
+//      copied into app storage on iOS via the resolver so it survives after
+//      the picked-folder security scope is gone; left as the persistent
+//      content:// URI on Android SAF.
+//   2. artwork embedded in the first audio file's metadata (single-file m4b
+//      etc.) — only extractable from range-readable file:// URIs.
+//   3. nothing — the book shows the placeholder icon until the user picks a
+//      cover from the internet.
+//
+// Best effort: a non-fatal cover problem must never fail an otherwise-good
+// import, so those errors are swallowed. The one exception is FatalImportError
+// — copyFileLocal's move-not-copy backstop, which means the picker is
+// destroying the user's source files. That MUST abort the whole scan, so it
+// is rethrown rather than relying on the assumption that it can't reach here.
+async function resolveBookCover(
+  bookId: number,
+  sidecarUri: string | null,
+  firstAudioLocalUri: string | null,
+  resolveFile: FileResolver,
+): Promise<void> {
+  let cover: string | null = null;
+
+  if (sidecarUri) {
+    try {
+      const ext = imageExtFromName(sidecarUri) ?? "jpg";
+      cover = await resolveFile(sidecarUri, bookId, `cover_${Date.now()}.${ext}`);
+    } catch (e) {
+      if (e instanceof FatalImportError) throw e;
+      console.warn("Could not store sidecar cover; trying embedded art:", e);
+      cover = null;
+    }
+  }
+
+  if (!cover && firstAudioLocalUri) {
+    cover = await extractEmbeddedCover(firstAudioLocalUri, bookId);
+  }
+
+  if (cover) {
+    try {
+      await updateBookCover(bookId, cover);
+    } catch (e) {
+      console.warn("Failed to persist book cover:", e);
+    }
+  }
+}
+
 async function importBookFromDirectory(
   audioFiles: ScannedFile[],
   imageFiles: ScannedFile[],
@@ -639,13 +688,17 @@ async function importBookFromDirectory(
     const title = getBookTitleFromPath(titleSource);
     console.log(`Importing book: ${title} with ${audioFiles.length} chapters`);
 
-    const bookId = await insertBook(title, directoryUri, undefined, coverUri || undefined);
+    // Cover is resolved after chapters land (it may need the copied audio
+    // file to read embedded art), so don't store the raw sidecar URI here.
+    const bookId = await insertBook(title, directoryUri, undefined, undefined);
 
+    let firstAudioLocalUri: string | null = null;
     try {
       for (let i = 0; i < audioFiles.length; i++) {
         const file = audioFiles[i];
         const chapterTitle = getChapterTitleFromFilename(file.name);
         const localUri = await resolveFile(file.uri, bookId, file.name);
+        if (i === 0) firstAudioLocalUri = localUri;
         await insertChapter(bookId, chapterTitle, localUri, i);
       }
     } catch (error) {
@@ -660,6 +713,8 @@ async function importBookFromDirectory(
       await cleanupFailedBook(bookId);
       return false;
     }
+
+    await resolveBookCover(bookId, coverUri, firstAudioLocalUri, resolveFile);
 
     return true;
   } catch (error) {
@@ -697,9 +752,10 @@ async function importSingleFile(
     const title = getChapterTitleFromFilename(file.name);
     console.log(`Importing single file book: ${title}`);
 
-    const bookId = await insertBook(title, uniquePath, undefined, coverUri || undefined);
+    const bookId = await insertBook(title, uniquePath, undefined, undefined);
+    let localUri: string;
     try {
-      const localUri = await resolveFile(file.uri, bookId, file.name);
+      localUri = await resolveFile(file.uri, bookId, file.name);
       await insertChapter(bookId, title, localUri, 0);
     } catch (error) {
       if (error instanceof FatalImportError) throw error;
@@ -709,6 +765,10 @@ async function importSingleFile(
       await cleanupFailedBook(bookId);
       return false;
     }
+
+    // Single-file books rarely have a sidecar image; the cover usually lives
+    // *inside* the file (m4b/mp3 metadata) — extractEmbeddedCover handles that.
+    await resolveBookCover(bookId, coverUri, localUri, resolveFile);
 
     return true;
   } catch (error) {
