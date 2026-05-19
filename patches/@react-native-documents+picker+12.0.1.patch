@@ -1,0 +1,19 @@
+diff --git a/node_modules/@react-native-documents/picker/ios/swift/FileOperations.swift b/node_modules/@react-native-documents/picker/ios/swift/FileOperations.swift
+index 19b96fa..2ae94cc 100644
+--- a/node_modules/@react-native-documents/picker/ios/swift/FileOperations.swift
++++ b/node_modules/@react-native-documents/picker/ios/swift/FileOperations.swift
+@@ -61,7 +61,13 @@ import React
+       )
+     }
+ 
+-    try FileManager.default.moveItem(at: from, to: destinationFile)
++    // PATCHED (book-player): upstream uses moveItem, which DELETES the source.
++    // We call this on files enumerated from a pickDirectory() tree, so the
++    // source is the user's real file in "On My iPhone" — moving it destroys
++    // their originals. copyItem preserves the source. For the library's other
++    // use (file pick from the temp inbox) the leftover inbox copy is purged
++    // by iOS anyway, so copying is safe there too.
++    try FileManager.default.copyItem(at: from, to: destinationFile)
+ 
+     return destinationFile
+   }
