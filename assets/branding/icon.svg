@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#33B3FE"/>
+      <stop offset="1" stop-color="#0767CE"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <g transform="translate(512 512) scale(1.12) translate(-512 -497)"
+     fill="none" stroke="#FFFFFF" stroke-linejoin="round" stroke-linecap="round">
+
+    <!-- headband -->
+    <path d="M 300 500 C 300 200, 724 200, 724 500" stroke-width="34"/>
+
+    <!-- earcups -->
+    <rect x="266" y="468" width="68" height="170" rx="34" fill="#FFFFFF" stroke="none"/>
+    <rect x="690" y="468" width="68" height="170" rx="34" fill="#FFFFFF" stroke="none"/>
+
+    <!-- open book: left page -->
+    <path stroke-width="24" d="M 512 706
+      C 470 684, 374 654, 320 648
+      C 308 647, 304 642, 304 628
+      L 304 404
+      C 304 390, 310 384, 324 384
+      C 380 386, 470 416, 512 452 Z"/>
+    <!-- open book: right page -->
+    <path stroke-width="24" d="M 512 706
+      C 554 684, 650 654, 704 648
+      C 716 647, 720 642, 720 628
+      L 720 404
+      C 720 390, 714 384, 700 384
+      C 644 386, 554 416, 512 452 Z"/>
+
+    <!-- spine -->
+    <path stroke-width="24" d="M 512 452 L 512 706"/>
+
+    <!-- page lines -->
+    <path stroke-width="9" d="M 360 444 C 410 452, 458 470, 492 492"/>
+    <path stroke-width="9" d="M 360 506 C 410 514, 458 532, 492 554"/>
+    <path stroke-width="9" d="M 664 444 C 614 452, 566 470, 532 492"/>
+    <path stroke-width="9" d="M 664 506 C 614 514, 566 532, 532 554"/>
+  </g>
+</svg>
