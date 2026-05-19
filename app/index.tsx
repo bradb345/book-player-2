@@ -328,7 +328,11 @@ export default function HomeScreen() {
           >
             <Ionicons name="folder-outline" size={24} color={colors.white} />
           </Pressable>
-          <Pressable style={styles.iconButton} hitSlop={8}>
+          <Pressable
+            style={styles.iconButton}
+            onPress={() => router.push("/settings")}
+            hitSlop={8}
+          >
             <Ionicons name="settings-outline" size={24} color={colors.white} />
           </Pressable>
         </View>
