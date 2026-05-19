@@ -1,0 +1,7 @@
+{
+  "name": "audio-metadata",
+  "version": "0.1.0",
+  "description": "Local Expo module: reads embedded cover art from audio files",
+  "main": "index.ts",
+  "private": true
+}

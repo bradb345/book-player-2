@@ -8,7 +8,7 @@ import {
   deleteBook,
   updateBookCover,
 } from "./database";
-import { extractEmbeddedCover } from "./coverArt";
+import { extractEmbeddedCover, imageExtFromName } from "./coverArt";
 import { getErrorMessage } from "@/utils/error";
 import { naturalCompare } from "@/utils/sort";
 
@@ -629,9 +629,11 @@ async function cleanupFailedBook(bookId: number): Promise<void> {
 //   3. nothing — the book shows the placeholder icon until the user picks a
 //      cover from the internet.
 //
-// Best effort: a cover problem must never fail an otherwise-good import, so
-// every step here swallows its errors (the chapters are already imported by
-// the time this runs, so even copyFileLocal's fatal-abort can't be reached).
+// Best effort: a non-fatal cover problem must never fail an otherwise-good
+// import, so those errors are swallowed. The one exception is FatalImportError
+// — copyFileLocal's move-not-copy backstop, which means the picker is
+// destroying the user's source files. That MUST abort the whole scan, so it
+// is rethrown rather than relying on the assumption that it can't reach here.
 async function resolveBookCover(
   bookId: number,
   sidecarUri: string | null,
@@ -642,9 +644,10 @@ async function resolveBookCover(
 
   if (sidecarUri) {
     try {
-      const ext = sidecarUri.toLowerCase().includes(".png") ? "png" : "jpg";
+      const ext = imageExtFromName(sidecarUri) ?? "jpg";
       cover = await resolveFile(sidecarUri, bookId, `cover_${Date.now()}.${ext}`);
     } catch (e) {
+      if (e instanceof FatalImportError) throw e;
       console.warn("Could not store sidecar cover; trying embedded art:", e);
       cover = null;
     }

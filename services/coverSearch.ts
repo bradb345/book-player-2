@@ -11,7 +11,11 @@
 // instead of the token (Voice sets one via an OkHttp interceptor).
 
 import * as FileSystem from "expo-file-system/legacy";
-import { saveCoverFromLocalFile } from "./coverArt";
+import {
+  saveCoverFromLocalFile,
+  imageExtFromName,
+  imageExtFromContentType,
+} from "./coverArt";
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -84,8 +88,15 @@ export async function searchCovers(query: string): Promise<CoverResult[]> {
     }));
 }
 
-function guessExt(uri: string): "jpg" | "png" {
-  return /\.png(\?|$)/i.test(uri) ? "png" : "jpg";
+function headerValue(
+  headers: Record<string, string>,
+  name: string,
+): string | undefined {
+  const lower = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return undefined;
 }
 
 // Download a chosen result and store it as the book's cover. Falls back to
@@ -98,17 +109,27 @@ export async function downloadCover(
 ): Promise<string | null> {
   const candidates = [result.image, result.thumbnail].filter(Boolean);
   for (const remote of candidates) {
+    // Declared outside the try so a throw mid-download can't leak the
+    // partially-written cache file.
+    const tmp = `${FileSystem.cacheDirectory}cover_dl_${bookId}_${Date.now()}`;
     try {
-      const tmp = `${FileSystem.cacheDirectory}cover_dl_${bookId}_${Date.now()}`;
       const dl = await FileSystem.downloadAsync(remote, tmp, {
         headers: { "User-Agent": USER_AGENT, Referer: "https://duckduckgo.com/" },
       });
       if (dl.status >= 200 && dl.status < 300) {
-        return await saveCoverFromLocalFile(bookId, dl.uri, guessExt(remote));
+        // Trust the server's Content-Type first, then the URL extension —
+        // DuckDuckGo results are often .webp or extensionless, and saving
+        // those as .jpg can make the cover fail to decode.
+        const ext =
+          imageExtFromContentType(headerValue(dl.headers, "content-type")) ??
+          imageExtFromName(remote) ??
+          "jpg";
+        return await saveCoverFromLocalFile(bookId, dl.uri, ext);
       }
       await FileSystem.deleteAsync(dl.uri, { idempotent: true }).catch(() => {});
     } catch (e) {
       console.warn("Cover download failed for", remote, e);
+      await FileSystem.deleteAsync(tmp, { idempotent: true }).catch(() => {});
     }
   }
   return null;

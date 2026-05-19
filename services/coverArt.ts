@@ -106,6 +106,35 @@ interface ExtractedImage {
   ext: "jpg" | "png";
 }
 
+// Image formats React Native's <Image> can decode and that we're willing to
+// store as a cover. ".jpeg" normalizes to "jpg".
+const SUPPORTED_IMAGE_EXTS = ["jpg", "jpeg", "png", "webp", "gif"] as const;
+
+// Derive a cover extension from a filename / URL path (query + fragment
+// stripped). Returns null for unknown/unsupported extensions so callers can
+// fall back to another signal rather than mislabeling the bytes.
+export function imageExtFromName(uriOrName: string): string | null {
+  const clean = uriOrName.split(/[?#]/)[0];
+  const dot = clean.lastIndexOf(".");
+  if (dot < 0) return null;
+  const ext = clean.slice(dot + 1).toLowerCase();
+  if (!(SUPPORTED_IMAGE_EXTS as readonly string[]).includes(ext)) return null;
+  return ext === "jpeg" ? "jpg" : ext;
+}
+
+// Derive a cover extension from an HTTP Content-Type (e.g. "image/webp").
+export function imageExtFromContentType(
+  contentType: string | undefined | null,
+): string | null {
+  if (!contentType) return null;
+  const t = contentType.toLowerCase();
+  if (t.includes("png")) return "png";
+  if (t.includes("webp")) return "webp";
+  if (t.includes("gif")) return "gif";
+  if (t.includes("jpeg") || t.includes("jpg")) return "jpg";
+  return null;
+}
+
 // ---- ID3v2 (MP3) ----
 
 async function extractFromId3(uri: string): Promise<ExtractedImage | null> {
