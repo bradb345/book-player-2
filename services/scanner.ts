@@ -44,6 +44,18 @@ interface PickResult {
   folderName: string;
 }
 
+// A non-recoverable import condition that must abort the ENTIRE scan, not
+// just skip one book. A per-file copy failure is "skip this book and keep
+// going"; this is "stop everything now" — used when the picker is moving
+// (destroying) source files because the move->copy patch isn't applied.
+// Carries a user-facing message; dev remediation is logged separately.
+class FatalImportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FatalImportError";
+  }
+}
+
 // Get the audiobooks storage directory
 async function getAudiobooksDirectory(): Promise<string> {
   const audiobooksDir = `${FileSystem.documentDirectory}audiobooks/`;
@@ -325,6 +337,12 @@ export async function scanAndImportFolder(folderUri: string): Promise<ImportResu
     const res = await scanAndImportLocalFolder(folderUri);
     return res;
   } catch (error) {
+    if (error instanceof FatalImportError) {
+      // Already aborted to protect the user's files; show its message as-is
+      // (no "Error scanning folder:" prefix — it's a user-facing sentence).
+      console.error("Import aborted (fatal):", error.message);
+      return { success: false, booksImported: 0, message: error.message };
+    }
     console.error("Error scanning folder:", error);
     return { success: false, booksImported: 0, message: `Error scanning folder: ${getErrorMessage(error)}` };
   }
@@ -544,20 +562,34 @@ async function copyFileLocal(
     throw new Error(`keepLocalCopy failed for ${filename}: ${copied.copyError}`);
   }
 
-  // Backstop against the move-not-copy bug (see comment above): the source
-  // must still exist. If it's gone, the patch is not applied and we're
-  // actively destroying the user's files — fail now so cleanupFailedBook
-  // rolls back and the scan stops before more files are lost.
-  const sourceInfo = await FileSystem.getInfoAsync(sourceUri);
-  if (!sourceInfo.exists) {
-    throw new Error(
-      `Import aborted: source file was removed by keepLocalCopy (${filename}). ` +
-        `The @react-native-documents/picker move->copy patch is not applied — ` +
-        `run "npx patch-package" / reinstall pods before importing.`
+  // Backstop against the move-not-copy bug (see comment above): did the
+  // source survive?
+  const sourceSurvived = (await FileSystem.getInfoAsync(sourceUri)).exists;
+
+  // Always move the materialized file into the book folder FIRST. In the
+  // normal (patched) case this is the intended copy. In the destructive
+  // (unpatched) case the source is already gone, so copied.localUri is the
+  // user's ONLY remaining copy — discarding it (e.g. as cleanup) would
+  // complete the data loss this backstop exists to prevent. Preserving it
+  // keeps that one book playable; we still abort below so the REST of the
+  // folder isn't destroyed.
+  await FileSystem.moveAsync({ from: copied.localUri, to: destUri });
+
+  if (!sourceSurvived) {
+    // Dev-facing remediation — logged, never shown to users.
+    console.error(
+      `keepLocalCopy MOVED instead of copied "${filename}": the ` +
+        `@react-native-documents/picker move->copy patch is not applied. ` +
+        `Run "npx patch-package" then rebuild native ` +
+        `("npx pod-install ios && npx expo run:ios").`
+    );
+    // User-facing, actionable, no internal jargon. FatalImportError aborts
+    // the whole scan so no further source files are destroyed.
+    throw new FatalImportError(
+      "Import stopped to protect your files. Please update to the latest " +
+        "version of the app, then try importing again."
     );
   }
-
-  await FileSystem.moveAsync({ from: copied.localUri, to: destUri });
 
   return destUri;
 }
@@ -617,6 +649,10 @@ async function importBookFromDirectory(
         await insertChapter(bookId, chapterTitle, localUri, i);
       }
     } catch (error) {
+      // A fatal condition (picker destroying sources) must abort the whole
+      // scan — and must NOT run cleanupFailedBook, which would delete the
+      // book folder holding the only surviving copy of the moved file.
+      if (error instanceof FatalImportError) throw error;
       // A chapter file is already imported (chapters.file_path is globally
       // UNIQUE) or a file couldn't be copied. Roll back so we don't leave a
       // half-imported book, and skip it rather than spamming an error.
@@ -627,6 +663,7 @@ async function importBookFromDirectory(
 
     return true;
   } catch (error) {
+    if (error instanceof FatalImportError) throw error;
     console.error("Error importing book from directory:", error);
     return false;
   }
@@ -665,6 +702,7 @@ async function importSingleFile(
       const localUri = await resolveFile(file.uri, bookId, file.name);
       await insertChapter(bookId, title, localUri, 0);
     } catch (error) {
+      if (error instanceof FatalImportError) throw error;
       // File already imported (chapters.file_path UNIQUE) or unreadable —
       // roll back the just-created book so it isn't left orphaned, and skip.
       console.warn(`Skipping "${title}" — could not import file:`, error);
@@ -674,6 +712,7 @@ async function importSingleFile(
 
     return true;
   } catch (error) {
+    if (error instanceof FatalImportError) throw error;
     console.error("Error importing single file book:", error);
     return false;
   }
@@ -783,6 +822,7 @@ async function importBookFromLocalDirectory(directoryUri: string): Promise<boole
 
     return importBookFromDirectory(audioFiles, imageFiles, directoryUri, directoryUri, localResolver);
   } catch (error) {
+    if (error instanceof FatalImportError) throw error;
     console.error("Error importing book from local directory:", error);
     return false;
   }
