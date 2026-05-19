@@ -64,7 +64,7 @@ Handles audiobook discovery and import from user-selected folders.
 
 ### Platform Differences
 - **Android (SAF)**: Plays audio directly from `content://` URIs. No file copying.
-- **iOS (Local)**: `pickAudiobooksFolder()` uses `@react-native-documents/picker` `pickDirectory({ requestLongTermAccess: true })`, which holds the iOS security scope for the app process across the picker call. `scanAndImportFolder()` then enumerates the tree with `expo-file-system` and copies every audio file into `{documentDirectory}/audiobooks/book_{id}/`, then calls `releaseSecureAccess()`. Because playback uses the copies, the bookmark isn't persisted — so iOS rescan/sync of an already-added folder can't see new files (the original scope is gone). This is the same "iOS sync is a follow-up" limitation noted below.
+- **iOS (Local)**: `pickAudiobooksFolder()` uses `@react-native-documents/picker` `pickDirectory({ requestLongTermAccess: true })`, which holds the iOS security scope for the app process across the picker call. `scanAndImportFolder()` then enumerates the tree with `expo-file-system` and copies every audio file into `{documentDirectory}/audiobooks/book_{id}/`. It deliberately does **not** call `releaseSecureAccess()`: in `@react-native-documents/picker` 12.0.1 that native call hard-crashes the app under the New Architecture (an uncatchable native crash), so the process-scoped security handle is intentionally leaked and left for iOS to reclaim when the process exits. Because playback uses the copies and the long-term bookmark is never persisted, iOS rescan/sync of an already-added folder can't see new files (the original scope is gone). This is the same "iOS sync is a follow-up" limitation noted below.
 
 ## Sync (`services/sync.ts`)
 

@@ -622,7 +622,13 @@ async function importSingleFile(
     // books imported by older builds and re-import them, colliding on the
     // globally-UNIQUE chapters.file_path. (The real, readable source URI is
     // file.uri, built correctly via joinUri during the scan.)
-    const uniquePath = `${originalFolderUri}/${file.name}`;
+    //
+    // Strip trailing slashes first: the iOS pickDirectory URI ends with "/",
+    // and older builds derived this base via getParentDirectory (no trailing
+    // slash). Without trimming we'd produce ".../Books//file.m4b" and miss
+    // those previously imported books. Trimming is shape-preserving (older
+    // builds never had the trailing slash); percent-encoding is still avoided.
+    const uniquePath = `${originalFolderUri.replace(/\/+$/, "")}/${file.name}`;
 
     if (await bookExistsAtPath(uniquePath)) {
       return false;

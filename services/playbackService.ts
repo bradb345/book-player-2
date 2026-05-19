@@ -8,8 +8,23 @@ export async function PlaybackService() {
   TrackPlayer.addEventListener(Event.RemotePlay, () => TrackPlayer.play());
   TrackPlayer.addEventListener(Event.RemotePause, () => TrackPlayer.pause());
   TrackPlayer.addEventListener(Event.RemoteStop, () => TrackPlayer.stop());
-  TrackPlayer.addEventListener(Event.RemoteNext, () => TrackPlayer.skipToNext());
-  TrackPlayer.addEventListener(Event.RemotePrevious, () => TrackPlayer.skipToPrevious());
+  // skipToNext/skipToPrevious reject when there is no next/previous track
+  // (start/end of queue). Swallow it so a lock-screen tap at the queue edge
+  // doesn't surface as an unhandled promise rejection.
+  TrackPlayer.addEventListener(Event.RemoteNext, async () => {
+    try {
+      await TrackPlayer.skipToNext();
+    } catch {
+      // no next track — nothing to do
+    }
+  });
+  TrackPlayer.addEventListener(Event.RemotePrevious, async () => {
+    try {
+      await TrackPlayer.skipToPrevious();
+    } catch {
+      // no previous track — nothing to do
+    }
+  });
   TrackPlayer.addEventListener(Event.RemoteSeek, (event) => TrackPlayer.seekTo(event.position));
   TrackPlayer.addEventListener(Event.RemoteJumpForward, async () => {
     const { position } = await TrackPlayer.getProgress();
