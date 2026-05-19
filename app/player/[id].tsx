@@ -15,9 +15,9 @@ import TrackPlayer from "react-native-track-player";
 import { colors } from "@/constants/theme";
 import { sharedStyles } from "@/constants/styles";
 import { useAudio } from "@/services/audioContext";
+import { useSettings } from "@/services/settingsContext";
 import { getBookHistoryByBookId } from "@/services/database";
 import { formatPlaybackTime } from "@/utils/format";
-import { SKIP_SECONDS } from "@/constants/playback";
 import { BookCover } from "@/components/BookCover";
 import { NotFoundScreen } from "@/components/NotFoundScreen";
 
@@ -28,6 +28,8 @@ export default function PlayerScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { settings } = useSettings();
+  const skipSeconds = settings.skipSeconds;
 
   const {
     state,
@@ -214,11 +216,11 @@ export default function PlayerScreen() {
 
         <Pressable
           style={styles.controlButton}
-          onPress={() => seekRelative(-SKIP_SECONDS * 1000)}
+          onPress={() => seekRelative(-skipSeconds * 1000)}
         >
           <View style={styles.skipButton}>
             <Ionicons name="play-back" size={32} color={colors.white} />
-            <Text style={styles.skipText}>{SKIP_SECONDS}</Text>
+            <Text style={styles.skipText}>{skipSeconds}</Text>
           </View>
         </Pressable>
 
@@ -241,11 +243,11 @@ export default function PlayerScreen() {
 
         <Pressable
           style={styles.controlButton}
-          onPress={() => seekRelative(SKIP_SECONDS * 1000)}
+          onPress={() => seekRelative(skipSeconds * 1000)}
         >
           <View style={styles.skipButton}>
             <Ionicons name="play-forward" size={32} color={colors.white} />
-            <Text style={styles.skipText}>{SKIP_SECONDS}</Text>
+            <Text style={styles.skipText}>{skipSeconds}</Text>
           </View>
         </Pressable>
 

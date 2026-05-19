@@ -23,7 +23,8 @@ import {
   updateBookHistoryDuration,
   upsertListeningSession,
 } from "./database";
-import { SKIP_SECONDS } from "@/constants/playback";
+import { getCachedSettings } from "./settings";
+import { useSettings } from "./settingsContext";
 
 interface AudioState {
   book: Book | null;
@@ -70,32 +71,41 @@ const AudioContext = createContext<AudioContextType | null>(null);
 
 let isPlayerSetup = false;
 
+// Full options object — passed to updateOptions both at setup and whenever the
+// skip interval changes. RNTP's updateOptions replaces (not merges) options, so
+// the capabilities must be included every time to avoid clobbering them.
+function buildPlayerOptions(skipSeconds: number) {
+  return {
+    capabilities: [
+      Capability.Play,
+      Capability.Pause,
+      Capability.SkipToNext,
+      Capability.SkipToPrevious,
+      Capability.SeekTo,
+      Capability.JumpForward,
+      Capability.JumpBackward,
+    ],
+    compactCapabilities: [
+      Capability.Play,
+      Capability.Pause,
+      Capability.SkipToNext,
+      Capability.SkipToPrevious,
+    ],
+    forwardJumpInterval: skipSeconds,
+    backwardJumpInterval: skipSeconds,
+    progressUpdateEventInterval: 1,
+  };
+}
+
 async function setupPlayer() {
   if (isPlayerSetup) return;
   try {
     await TrackPlayer.setupPlayer({
       autoHandleInterruptions: true,
     });
-    await TrackPlayer.updateOptions({
-      capabilities: [
-        Capability.Play,
-        Capability.Pause,
-        Capability.SkipToNext,
-        Capability.SkipToPrevious,
-        Capability.SeekTo,
-        Capability.JumpForward,
-        Capability.JumpBackward,
-      ],
-      compactCapabilities: [
-        Capability.Play,
-        Capability.Pause,
-        Capability.SkipToNext,
-        Capability.SkipToPrevious,
-      ],
-      forwardJumpInterval: SKIP_SECONDS,
-      backwardJumpInterval: SKIP_SECONDS,
-      progressUpdateEventInterval: 1,
-    });
+    await TrackPlayer.updateOptions(
+      buildPlayerOptions(getCachedSettings().skipSeconds)
+    );
     await TrackPlayer.setRepeatMode(RepeatMode.Off);
     isPlayerSetup = true;
   } catch (e) {
@@ -114,16 +124,97 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   const lastProgressTimestampRef = useRef<number | null>(null);
   const playerReadyRef = useRef(false);
 
+  const { settings } = useSettings();
+  const settingsRef = useRef(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  // Auto sleep timer handle; pauses playback when it fires.
+  const sleepTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Refs for callbacks to avoid stale closures
   const stateRef = useRef(state);
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
+  // Keep the lock-screen / notification jump buttons in sync with the
+  // configured skip interval (setupPlayer may have run before settings loaded).
+  useEffect(() => {
+    if (!playerReadyRef.current) return;
+    TrackPlayer.updateOptions(buildPlayerOptions(settings.skipSeconds)).catch(
+      (e) => console.warn("Error updating jump intervals:", e)
+    );
+  }, [settings.skipSeconds]);
+
+  // Auto sleep timer: when playback is running inside the configured clock
+  // window, pause it after the configured duration. The timer (re)starts each
+  // time playback resumes and is cleared on pause / unmount.
+  useEffect(() => {
+    const clearSleep = () => {
+      if (sleepTimeoutRef.current) {
+        clearTimeout(sleepTimeoutRef.current);
+        sleepTimeoutRef.current = null;
+      }
+    };
+
+    if (
+      !state.isPlaying ||
+      !settings.autoSleepEnabled ||
+      settings.autoSleepDurationMin <= 0
+    ) {
+      clearSleep();
+      return;
+    }
+
+    const now = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const start = settings.autoSleepStartMin;
+    const end = settings.autoSleepEndMin;
+    // end <= start means the window wraps past midnight (e.g. 22:00–06:00).
+    const inWindow =
+      start === end
+        ? true
+        : start < end
+          ? nowMin >= start && nowMin < end
+          : nowMin >= start || nowMin < end;
+
+    if (!inWindow) {
+      clearSleep();
+      return;
+    }
+
+    clearSleep();
+    sleepTimeoutRef.current = setTimeout(
+      () => {
+        sleepTimeoutRef.current = null;
+        TrackPlayer.pause().catch((e) =>
+          console.warn("Error pausing for sleep timer:", e)
+        );
+        setState((prev) => ({ ...prev, isPlaying: false }));
+      },
+      settings.autoSleepDurationMin * 60 * 1000
+    );
+
+    return clearSleep;
+  }, [
+    state.isPlaying,
+    settings.autoSleepEnabled,
+    settings.autoSleepStartMin,
+    settings.autoSleepEndMin,
+    settings.autoSleepDurationMin,
+  ]);
+
   // Setup player on mount
   useEffect(() => {
     setupPlayer().then(() => {
       playerReadyRef.current = true;
+      // If settings finished loading before the player was ready, the
+      // skipSeconds effect above would have bailed early — reapply now.
+      TrackPlayer.updateOptions(
+        buildPlayerOptions(settingsRef.current.skipSeconds)
+      ).catch((e) => console.warn("Error applying jump intervals:", e));
     });
   }, []);
 
@@ -367,12 +458,16 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     accumulatedListeningMsRef.current = 0;
     lastProgressTimestampRef.current = null;
 
+    // Newly opened books start at the user's default playback speed.
+    const defaultSpeed = settingsRef.current.defaultPlaybackSpeed;
+
     setState((prev) => ({
       ...prev,
       book: bookData.book,
       chapters: bookData.chapters,
       currentChapterIndex: chapterIndex,
       positionMs: initialPosition,
+      playbackSpeed: defaultSpeed,
       isLoading: false,
     }));
 
@@ -387,8 +482,8 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         if (initialPosition > 0) {
           await TrackPlayer.seekTo(initialPosition / 1000);
         }
-        // Apply current playback speed
-        await TrackPlayer.setRate(stateRef.current.playbackSpeed);
+        // Apply the default playback speed for this book
+        await TrackPlayer.setRate(defaultSpeed);
 
         // Fetch initial track duration (progress events only fire while playing)
         try {
@@ -441,6 +536,23 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // Rewind a few seconds before resuming so you don't lose your place after
+  // a pause. No-op when the setting is 0 or playback is at the very start.
+  const applyAutoRewind = useCallback(async () => {
+    const seconds = settingsRef.current.autoRewindSeconds;
+    if (seconds <= 0) return;
+    try {
+      const { position } = await TrackPlayer.getProgress();
+      const target = Math.max(0, position - seconds);
+      if (target < position) {
+        await TrackPlayer.seekTo(target);
+        setState((prev) => ({ ...prev, positionMs: Math.round(target * 1000) }));
+      }
+    } catch (e) {
+      console.warn("Error applying auto-rewind:", e);
+    }
+  }, []);
+
   // Toggle playback
   const togglePlayback = useCallback(async () => {
     try {
@@ -449,23 +561,25 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         await TrackPlayer.pause();
         setState((prev) => ({ ...prev, isPlaying: false }));
       } else {
+        await applyAutoRewind();
         await TrackPlayer.play();
         setState((prev) => ({ ...prev, isPlaying: true }));
       }
     } catch (e) {
       console.error("Error toggling playback:", e);
     }
-  }, []);
+  }, [applyAutoRewind]);
 
   // Play
   const play = useCallback(async () => {
     try {
+      await applyAutoRewind();
       await TrackPlayer.play();
       setState((prev) => ({ ...prev, isPlaying: true }));
     } catch (e) {
       console.error("Error playing:", e);
     }
-  }, []);
+  }, [applyAutoRewind]);
 
   // Pause
   const pause = useCallback(async () => {

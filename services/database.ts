@@ -194,6 +194,11 @@ async function initializeDatabase(database: SQLite.SQLiteDatabase): Promise<void
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_listening_sessions_unique
       ON listening_sessions(book_history_id, session_date);
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 
   // Cleanup: remove book_history rows that were created by the old backfill
@@ -617,6 +622,27 @@ export async function folderSourceExists(uri: string): Promise<boolean> {
       [uri]
     );
     return (result?.count ?? 0) > 0;
+  });
+}
+
+// App settings (simple key/value store; values are JSON-encoded strings)
+export async function getAllSettingsRows(): Promise<{ key: string; value: string }[]> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getAllAsync<{ key: string; value: string }>(
+      `SELECT key, value FROM app_settings`
+    );
+  });
+}
+
+export async function setSettingValue(key: string, value: string): Promise<void> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(
+      `INSERT INTO app_settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [key, value]
+    );
   });
 }
 
