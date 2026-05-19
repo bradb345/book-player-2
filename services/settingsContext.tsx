@@ -4,6 +4,7 @@ import React, {
   useState,
   useEffect,
   useCallback,
+  useRef,
 } from "react";
 import {
   AppSettings,
@@ -27,12 +28,16 @@ const SettingsContext = createContext<SettingsContextType | null>(null);
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [ready, setReady] = useState(false);
+  // Guards against a hydration overwrite: if the user taps a control before
+  // loadSettings resolves, the loaded snapshot would otherwise revert their
+  // change (saveSetting already merged it into the module cache).
+  const userTouchedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     loadSettings().then((loaded) => {
       if (cancelled) return;
-      setSettings(loaded);
+      if (!userTouchedRef.current) setSettings(loaded);
       setReady(true);
     });
     return () => {
@@ -42,6 +47,7 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
 
   const updateSetting = useCallback(
     async <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
+      userTouchedRef.current = true;
       // Optimistic: reflect immediately, then persist.
       setSettings((prev) => ({ ...prev, [key]: value }));
       try {

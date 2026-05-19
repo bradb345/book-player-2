@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -80,13 +80,13 @@ function TimePickerModal({
   const [hour, setHour] = useState(Math.floor(initialMinutes / 60) % 24);
   const [minute, setMinute] = useState(initialMinutes % 60);
 
-  // Re-seed the steppers whenever the modal is (re)opened.
-  const [seed, setSeed] = useState(initialMinutes);
-  if (visible && seed !== initialMinutes) {
-    setSeed(initialMinutes);
+  // Re-seed the steppers whenever the modal is (re)opened or the caller
+  // points it at a different stored value.
+  useEffect(() => {
+    if (!visible) return;
     setHour(Math.floor(initialMinutes / 60) % 24);
     setMinute(initialMinutes % 60);
-  }
+  }, [visible, initialMinutes]);
 
   const wrap = (v: number, max: number) => ((v % max) + max) % max;
 

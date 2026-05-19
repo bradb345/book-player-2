@@ -42,7 +42,9 @@ let loadPromise: Promise<AppSettings> | null = null;
 function coerce(rows: { key: string; value: string }[]): AppSettings {
   const next: AppSettings = { ...DEFAULT_SETTINGS };
   for (const { key, value } of rows) {
-    if (!(key in next)) continue;
+    // Own-property check — skips inherited names like `__proto__` /
+    // `constructor` even if a row with that key sneaks into the DB.
+    if (!Object.prototype.hasOwnProperty.call(next, key)) continue;
     try {
       const parsed = JSON.parse(value);
       // Only accept values whose type matches the default's type.
@@ -87,14 +89,15 @@ export async function saveSetting<K extends keyof AppSettings>(
   return cache;
 }
 
-// Used by the background remote handler, which runs outside React. Ensures the
-// cache is populated even if the handler fires before the provider mounts.
+// Used by the background remote handler, which runs outside React. Always
+// awaits a pending hydration so remote events don't see stale defaults during
+// the brief startup window when `loadPromise` is in-flight but unresolved.
 export async function getSkipSeconds(): Promise<number> {
-  if (!loadPromise) await loadSettings();
+  await (loadPromise ?? loadSettings());
   return cache.skipSeconds;
 }
 
 export async function getAutoRewindSeconds(): Promise<number> {
-  if (!loadPromise) await loadSettings();
+  await (loadPromise ?? loadSettings());
   return cache.autoRewindSeconds;
 }
