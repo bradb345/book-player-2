@@ -47,7 +47,7 @@ export function ProgressRing({
           strokeWidth={strokeWidth}
           fill="none"
           strokeLinecap="round"
-          strokeDasharray={circumference}
+          strokeDasharray={[circumference, circumference]}
           strokeDashoffset={offset}
           // Start the fill from 12 o'clock instead of 3 o'clock.
           rotation={-90}

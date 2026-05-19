@@ -157,7 +157,7 @@ export default function AnalyticsScreen() {
             </View>
 
             {/* Summary */}
-            <View style={styles.group}>
+            <View style={[styles.group, styles.summary]}>
               <View style={[styles.summaryRow, styles.rowDivider]}>
                 <Text style={styles.summaryLabel}>Books Started</Text>
                 <Text style={styles.summaryValue}>{startedCount}</Text>
@@ -287,6 +287,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.mediumGrey,
     borderRadius: 16,
     paddingHorizontal: 16,
+  },
+  summary: {
     marginBottom: 22,
   },
   summaryRow: {
