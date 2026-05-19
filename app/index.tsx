@@ -41,7 +41,7 @@ interface BookSection {
   data: BookWithProgress[];
 }
 
-type MenuAction = "edit" | "reset" | "delete";
+type MenuAction = "edit" | "cover" | "reset" | "delete";
 
 export default function HomeScreen() {
   const [books, setBooks] = useState<BookWithProgress[]>([]);
@@ -169,6 +169,10 @@ export default function HomeScreen() {
       case "edit":
         setEditTitle(selectedBook.title);
         setEditModalVisible(true);
+        break;
+
+      case "cover":
+        router.push(`/cover-search/${selectedBook.id}`);
         break;
 
       case "reset":
@@ -396,6 +400,14 @@ export default function HomeScreen() {
             >
               <Ionicons name="pencil" size={22} color={colors.white} />
               <Text style={styles.menuItemText}>Edit Title</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => handleMenuAction("cover")}
+            >
+              <Ionicons name="image" size={22} color={colors.white} />
+              <Text style={styles.menuItemText}>Cover from Internet</Text>
             </Pressable>
 
             {selectedBook?.progress && (

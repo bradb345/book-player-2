@@ -553,6 +553,16 @@ export async function updateBookTitle(bookId: number, title: string): Promise<vo
   });
 }
 
+export async function updateBookCover(bookId: number, coverPath: string | null): Promise<void> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(`UPDATE books SET cover_path = ? WHERE id = ?`, [
+      coverPath,
+      bookId,
+    ]);
+  });
+}
+
 export async function resetBookProgress(bookId: number): Promise<void> {
   return withRetry(async () => {
     const database = await getDatabase();
