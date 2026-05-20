@@ -914,7 +914,7 @@ export async function getNotesForBookHistory(bookHistoryId: number): Promise<Not
   return withRetry(async () => {
     const database = await getDatabase();
     return await database.getAllAsync<Note>(
-      `SELECT * FROM notes WHERE book_history_id = ? ORDER BY created_at DESC`,
+      `SELECT * FROM notes WHERE book_history_id = ? ORDER BY created_at DESC, id DESC`,
       [bookHistoryId]
     );
   });
@@ -927,7 +927,7 @@ export async function getRecentNotesForBookHistory(
   return withRetry(async () => {
     const database = await getDatabase();
     return await database.getAllAsync<Note>(
-      `SELECT * FROM notes WHERE book_history_id = ? ORDER BY created_at DESC LIMIT ?`,
+      `SELECT * FROM notes WHERE book_history_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
       [bookHistoryId, limit]
     );
   });

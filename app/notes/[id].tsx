@@ -61,12 +61,14 @@ export default function NotesScreen() {
   const { state } = useAudio();
 
   const bookHistoryId = id ? parseInt(id) : NaN;
+  const hasValidId = Number.isFinite(bookHistoryId);
 
   const [history, setHistory] = useState<BookHistory | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState("");
   const listRef = useRef<FlatList<Note> | null>(null);
+  const didInitialScrollRef = useRef(false);
 
   // Cumulative position is available when the audio context has loaded the
   // same book this history record points to. Otherwise (e.g. opened from
@@ -85,7 +87,7 @@ export default function NotesScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      if (!Number.isFinite(bookHistoryId)) return;
+      if (!hasValidId) return;
       const load = async () => {
         const [bh, n] = await Promise.all([
           getBookHistoryById(bookHistoryId),
@@ -97,7 +99,7 @@ export default function NotesScreen() {
         setLoaded(true);
       };
       load();
-    }, [bookHistoryId])
+    }, [bookHistoryId, hasValidId])
   );
 
   const handleSave = async () => {
@@ -140,7 +142,7 @@ export default function NotesScreen() {
     ]);
   };
 
-  if (loaded && !history) {
+  if (!hasValidId || (loaded && !history)) {
     return <NotFoundScreen message="Book not found" />;
   }
 
@@ -199,7 +201,16 @@ export default function NotesScreen() {
           data={notes}
           keyExtractor={(item) => String(item.id)}
           contentContainerStyle={styles.listContent}
-          onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
+          onContentSizeChange={() => {
+            // One-shot scroll-to-end on initial layout so the newest note
+            // sits next to the compose bar. After that, only handleSave
+            // explicitly scrolls — otherwise reading older notes is
+            // impossible (rotation / font scaling would snap back).
+            if (!didInitialScrollRef.current) {
+              listRef.current?.scrollToEnd({ animated: false });
+              didInitialScrollRef.current = true;
+            }
+          }}
           renderItem={({ item }) => (
             <Pressable
               onLongPress={() => handleDelete(item)}
