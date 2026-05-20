@@ -250,10 +250,8 @@ export default function HomeScreen() {
   };
 
   const renderBookItem = ({ item }: { item: BookWithProgress }) => {
-    // Only calculate progress if we have valid duration data
-    const hasValidProgress = item.progress && item.progress.cumulative_position_ms > 0 && item.total_duration_ms > 0;
-    const progressPercent = hasValidProgress
-      ? Math.min(100, (item.progress!.cumulative_position_ms / item.total_duration_ms) * 100)
+    const progressPercent = item.progress
+      ? Math.min(100, item.progress.progress_fraction * 100)
       : 0;
 
     return (
