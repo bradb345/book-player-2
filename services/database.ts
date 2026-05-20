@@ -466,6 +466,10 @@ export async function getProgress(bookId: number): Promise<Progress | null> {
 
 export interface ProgressWithCumulative extends Progress {
   cumulative_position_ms: number;
+  // Whole-book progress as a 0..1 fraction. Falls back to a chapter-equivalent
+  // estimate when not every chapter has had its duration probed yet — see
+  // comment in the implementation.
+  progress_fraction: number;
 }
 
 export async function getProgressWithCumulativePosition(bookId: number): Promise<ProgressWithCumulative | null> {
@@ -479,29 +483,72 @@ export async function getProgressWithCumulativePosition(bookId: number): Promise
 
     if (!progress) return null;
 
-    // Get the position (order) of the current chapter
-    const currentChapter = await database.getFirstAsync<{ position: number }>(
-      `SELECT position FROM chapters WHERE id = ?`,
-      [progress.current_chapter_id]
+    const currentChapter = await database.getFirstAsync<{ position: number; duration_ms: number }>(
+      `SELECT position, duration_ms FROM chapters WHERE id = ? AND book_id = ?`,
+      [progress.current_chapter_id, bookId]
     );
 
     if (!currentChapter) {
-      // Chapter not found, return progress with just current position
-      return { ...progress, cumulative_position_ms: progress.position_ms };
+      return {
+        ...progress,
+        cumulative_position_ms: progress.position_ms,
+        progress_fraction: 0,
+      };
     }
 
-    // Sum durations of all chapters before the current one
-    const result = await database.getFirstAsync<{ total_ms: number }>(
-      `SELECT COALESCE(SUM(duration_ms), 0) as total_ms
+    // Single aggregate pass over the book's chapters — avoids transferring
+    // every chapter row into JS just to compute counts/sums (HomeScreen calls
+    // this once per book during library load).
+    const agg = await database.getFirstAsync<{
+      total_count: number;
+      known_count: number;
+      total_duration: number;
+      prev_duration: number;
+      prev_count: number;
+    }>(
+      `SELECT
+         COUNT(*) AS total_count,
+         COUNT(CASE WHEN duration_ms > 0 THEN 1 END) AS known_count,
+         COALESCE(SUM(duration_ms), 0) AS total_duration,
+         COALESCE(SUM(CASE WHEN position < ? THEN duration_ms ELSE 0 END), 0) AS prev_duration,
+         COUNT(CASE WHEN position < ? THEN 1 END) AS prev_count
        FROM chapters
-       WHERE book_id = ? AND position < ?`,
-      [bookId, currentChapter.position]
+       WHERE book_id = ?`,
+      [currentChapter.position, currentChapter.position, bookId]
     );
 
-    const previousChaptersDuration = result?.total_ms ?? 0;
+    const totalCount = agg?.total_count ?? 0;
+    const knownCount = agg?.known_count ?? 0;
+    const totalDuration = agg?.total_duration ?? 0;
+    const previousChaptersDuration = agg?.prev_duration ?? 0;
+    const currentIdx = agg?.prev_count ?? 0;
+
     const cumulativePosition = previousChaptersDuration + progress.position_ms;
 
-    return { ...progress, cumulative_position_ms: cumulativePosition };
+    // Chapter durations are filled in lazily by the player (see
+    // services/audioContext.tsx — `updateChapterDuration`). Until every chapter
+    // has been played at least briefly, summing `duration_ms` underestimates
+    // the book length and a multi-file book would appear "near complete" after
+    // one chapter. Detect that case and fall back to a chapter-equivalent
+    // fraction instead.
+    const chapterFraction = currentChapter.duration_ms > 0
+      ? Math.max(0, Math.min(1, progress.position_ms / currentChapter.duration_ms))
+      : 0;
+    const allDurationsKnown = totalCount > 0 && knownCount === totalCount;
+
+    let progressFraction = 0;
+    if (allDurationsKnown && totalDuration > 0) {
+      progressFraction = cumulativePosition / totalDuration;
+    } else if (totalCount > 0) {
+      progressFraction = (currentIdx + chapterFraction) / totalCount;
+    }
+    progressFraction = Math.max(0, Math.min(1, progressFraction));
+
+    return {
+      ...progress,
+      cumulative_position_ms: cumulativePosition,
+      progress_fraction: progressFraction,
+    };
   });
 }
 
