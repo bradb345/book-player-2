@@ -6,8 +6,10 @@ import {
   Pressable,
   StatusBar,
   ActivityIndicator,
+  Modal,
+  FlatList,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from "@react-native-community/slider";
@@ -17,7 +19,7 @@ import { sharedStyles } from "@/constants/styles";
 import { useAudio } from "@/services/audioContext";
 import { useSettings } from "@/services/settingsContext";
 import { getBookHistoryByBookId } from "@/services/database";
-import { formatPlaybackTime } from "@/utils/format";
+import { formatPlaybackTime, formatDuration } from "@/utils/format";
 import { BookCover } from "@/components/BookCover";
 import { NotFoundScreen } from "@/components/NotFoundScreen";
 
@@ -39,6 +41,7 @@ export default function PlayerScreen() {
     seekRelative,
     nextChapter,
     previousChapter,
+    goToChapter,
     setPlaybackSpeed,
   } = useAudio();
 
@@ -58,6 +61,7 @@ export default function PlayerScreen() {
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekValue, setSeekValue] = useState(0);
+  const [showChapters, setShowChapters] = useState(false);
 
   // Load book on mount
   useEffect(() => {
@@ -118,7 +122,7 @@ export default function PlayerScreen() {
           onPress={() => router.back()}
           hitSlop={8}
         >
-          <Ionicons name="chevron-down" size={28} color={colors.white} />
+          <Ionicons name="chevron-back" size={28} color={colors.white} />
         </Pressable>
         <View style={styles.headerCenter}>
           <Text style={styles.headerSubtitle}>NOW PLAYING</Text>
@@ -158,9 +162,16 @@ export default function PlayerScreen() {
           </Text>
         )}
         {chapters.length > 1 && (
-          <Text style={styles.chapterCount}>
-            Chapter {currentChapterIndex + 1} of {chapters.length}
-          </Text>
+          <Pressable
+            style={styles.chapterCountButton}
+            onPress={() => setShowChapters(true)}
+            hitSlop={8}
+          >
+            <Text style={styles.chapterCount}>
+              Chapter {currentChapterIndex + 1} of {chapters.length}
+            </Text>
+            <Ionicons name="chevron-down" size={14} color={colors.lightGrey} />
+          </Pressable>
         )}
       </View>
 
@@ -296,6 +307,83 @@ export default function PlayerScreen() {
           </View>
         )}
       </View>
+
+      <Modal
+        visible={showChapters}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowChapters(false)}
+      >
+        <SafeAreaView style={sharedStyles.container} edges={["top", "bottom"]}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Chapters</Text>
+            <Pressable
+              onPress={() => setShowChapters(false)}
+              hitSlop={16}
+              style={styles.modalCloseButton}
+            >
+              <Ionicons name="close" size={26} color={colors.white} />
+            </Pressable>
+          </View>
+          <FlatList
+            data={chapters}
+            keyExtractor={(item) => String(item.id)}
+            initialScrollIndex={
+              currentChapterIndex < chapters.length ? currentChapterIndex : 0
+            }
+            getItemLayout={(_, index) => ({
+              length: 64,
+              offset: 64 * index,
+              index,
+            })}
+            renderItem={({ item, index }) => {
+              const isCurrent = index === currentChapterIndex;
+              return (
+                <Pressable
+                  style={[
+                    styles.chapterRow,
+                    isCurrent && styles.chapterRowActive,
+                  ]}
+                  onPress={async () => {
+                    setShowChapters(false);
+                    if (index !== currentChapterIndex) {
+                      await goToChapter(index, 0);
+                    }
+                  }}
+                >
+                  <View style={styles.chapterRowLeft}>
+                    {isCurrent ? (
+                      <Ionicons
+                        name={isPlaying ? "volume-high" : "pause"}
+                        size={18}
+                        color={colors.red}
+                      />
+                    ) : (
+                      <Text style={styles.chapterNumber}>{index + 1}</Text>
+                    )}
+                  </View>
+                  <View style={styles.chapterRowMain}>
+                    <Text
+                      style={[
+                        styles.chapterRowTitle,
+                        isCurrent && styles.chapterRowTitleActive,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {item.title}
+                    </Text>
+                    {item.duration_ms > 0 && (
+                      <Text style={styles.chapterRowDuration}>
+                        {formatDuration(item.duration_ms)}
+                      </Text>
+                    )}
+                  </View>
+                </Pressable>
+              );
+            }}
+          />
+        </SafeAreaView>
+      </Modal>
     </View>
   );
 }
@@ -324,6 +412,64 @@ const styles = StyleSheet.create({
     padding: 4,
     width: 36,
     alignItems: "center",
+  },
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.mediumGrey,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "600",
+    color: colors.white,
+  },
+  modalCloseButton: {
+    padding: 4,
+  },
+  chapterRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    height: 64,
+    paddingHorizontal: 20,
+  },
+  chapterRowActive: {
+    backgroundColor: colors.mediumGrey,
+  },
+  chapterRowLeft: {
+    width: 32,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  chapterNumber: {
+    fontSize: 14,
+    color: colors.lightGrey,
+    fontVariant: ["tabular-nums"],
+  },
+  chapterRowMain: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginLeft: 12,
+    gap: 12,
+  },
+  chapterRowTitle: {
+    flex: 1,
+    fontSize: 15,
+    color: colors.white,
+  },
+  chapterRowTitleActive: {
+    color: colors.red,
+    fontWeight: "600",
+  },
+  chapterRowDuration: {
+    fontSize: 13,
+    color: colors.lightGrey,
+    fontVariant: ["tabular-nums"],
   },
   coverContainer: {
     flex: 1,
@@ -363,6 +509,13 @@ const styles = StyleSheet.create({
     color: colors.lightGrey,
     textAlign: "center",
     marginBottom: 4,
+  },
+  chapterCountButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
   },
   chapterCount: {
     fontSize: 14,
