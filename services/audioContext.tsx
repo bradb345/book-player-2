@@ -416,12 +416,18 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    // Reset player before changing state
+    // Stop and reset player before changing state. reset() halts native
+    // playback, so mirror that in state — otherwise the play/pause button
+    // stays on "pause" while audio is silent (usePlaybackState is gated out
+    // during the transition below).
+    try {
+      await TrackPlayer.pause();
+    } catch { /* ignore if not initialized yet */ }
     try {
       await TrackPlayer.reset();
     } catch { /* ignore if not initialized yet */ }
 
-    setState((prev) => ({ ...prev, isLoading: true, error: null }));
+    setState((prev) => ({ ...prev, isPlaying: false, isLoading: true, error: null }));
 
     // Ensure player is set up
     await setupPlayer();
@@ -468,6 +474,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       currentChapterIndex: chapterIndex,
       positionMs: initialPosition,
       playbackSpeed: defaultSpeed,
+      isPlaying: false,
       isLoading: false,
     }));
 
