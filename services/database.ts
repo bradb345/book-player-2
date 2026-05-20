@@ -483,14 +483,12 @@ export async function getProgressWithCumulativePosition(bookId: number): Promise
 
     if (!progress) return null;
 
-    const chapters = await database.getAllAsync<{ id: number; position: number; duration_ms: number }>(
-      `SELECT id, position, duration_ms FROM chapters WHERE book_id = ? ORDER BY position ASC`,
-      [bookId]
+    const currentChapter = await database.getFirstAsync<{ position: number; duration_ms: number }>(
+      `SELECT position, duration_ms FROM chapters WHERE id = ? AND book_id = ?`,
+      [progress.current_chapter_id, bookId]
     );
 
-    const currentIdx = chapters.findIndex((c) => c.id === progress.current_chapter_id);
-
-    if (currentIdx === -1) {
+    if (!currentChapter) {
       return {
         ...progress,
         cumulative_position_ms: progress.position_ms,
@@ -498,28 +496,51 @@ export async function getProgressWithCumulativePosition(bookId: number): Promise
       };
     }
 
-    const previousChaptersDuration = chapters
-      .slice(0, currentIdx)
-      .reduce((sum, c) => sum + c.duration_ms, 0);
+    // Single aggregate pass over the book's chapters — avoids transferring
+    // every chapter row into JS just to compute counts/sums (HomeScreen calls
+    // this once per book during library load).
+    const agg = await database.getFirstAsync<{
+      total_count: number;
+      known_count: number;
+      total_duration: number;
+      prev_duration: number;
+      prev_count: number;
+    }>(
+      `SELECT
+         COUNT(*) AS total_count,
+         COUNT(CASE WHEN duration_ms > 0 THEN 1 END) AS known_count,
+         COALESCE(SUM(duration_ms), 0) AS total_duration,
+         COALESCE(SUM(CASE WHEN position < ? THEN duration_ms ELSE 0 END), 0) AS prev_duration,
+         COUNT(CASE WHEN position < ? THEN 1 END) AS prev_count
+       FROM chapters
+       WHERE book_id = ?`,
+      [currentChapter.position, currentChapter.position, bookId]
+    );
+
+    const totalCount = agg?.total_count ?? 0;
+    const knownCount = agg?.known_count ?? 0;
+    const totalDuration = agg?.total_duration ?? 0;
+    const previousChaptersDuration = agg?.prev_duration ?? 0;
+    const currentIdx = agg?.prev_count ?? 0;
+
     const cumulativePosition = previousChaptersDuration + progress.position_ms;
 
-    // Chapter durations are filled in lazily by the player (see scanner.ts).
-    // Until every chapter has been played at least briefly, summing
-    // `duration_ms` underestimates the book length and a multi-file book would
-    // appear "near complete" after one chapter. Detect that case and fall back
-    // to a chapter-equivalent fraction instead.
-    const currentChapter = chapters[currentIdx];
+    // Chapter durations are filled in lazily by the player (see
+    // services/audioContext.tsx — `updateChapterDuration`). Until every chapter
+    // has been played at least briefly, summing `duration_ms` underestimates
+    // the book length and a multi-file book would appear "near complete" after
+    // one chapter. Detect that case and fall back to a chapter-equivalent
+    // fraction instead.
     const chapterFraction = currentChapter.duration_ms > 0
       ? Math.max(0, Math.min(1, progress.position_ms / currentChapter.duration_ms))
       : 0;
-    const allDurationsKnown = chapters.every((c) => c.duration_ms > 0);
-    const totalDuration = chapters.reduce((sum, c) => sum + c.duration_ms, 0);
+    const allDurationsKnown = totalCount > 0 && knownCount === totalCount;
 
     let progressFraction = 0;
     if (allDurationsKnown && totalDuration > 0) {
       progressFraction = cumulativePosition / totalDuration;
-    } else if (chapters.length > 0) {
-      progressFraction = (currentIdx + chapterFraction) / chapters.length;
+    } else if (totalCount > 0) {
+      progressFraction = (currentIdx + chapterFraction) / totalCount;
     }
     progressFraction = Math.max(0, Math.min(1, progressFraction));
 
