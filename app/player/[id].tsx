@@ -18,7 +18,7 @@ import { colors } from "@/constants/theme";
 import { sharedStyles } from "@/constants/styles";
 import { useAudio } from "@/services/audioContext";
 import { useSettings } from "@/services/settingsContext";
-import { getBookHistoryByBookId } from "@/services/database";
+import { getBookHistoryByBookId, getOrCreateBookHistory } from "@/services/database";
 import { formatPlaybackTime, formatDuration } from "@/utils/format";
 import { BookCover } from "@/components/BookCover";
 import { NotFoundScreen } from "@/components/NotFoundScreen";
@@ -128,7 +128,18 @@ export default function PlayerScreen() {
           <Text style={styles.headerSubtitle}>NOW PLAYING</Text>
         </View>
         <Pressable
-          style={styles.analyticsButton}
+          style={styles.headerIconButton}
+          onPress={async () => {
+            if (!book) return;
+            const history = await getOrCreateBookHistory(book.id);
+            router.push(`/notes/${history.id}`);
+          }}
+          hitSlop={8}
+        >
+          <Ionicons name="create-outline" size={22} color={colors.white} />
+        </Pressable>
+        <Pressable
+          style={styles.headerIconButton}
           onPress={async () => {
             if (!book) return;
             const history = await getBookHistoryByBookId(book.id);
@@ -408,9 +419,9 @@ const styles = StyleSheet.create({
     color: colors.lightGrey,
     letterSpacing: 1,
   },
-  analyticsButton: {
+  headerIconButton: {
     padding: 4,
-    width: 36,
+    width: 32,
     alignItems: "center",
   },
   modalHeader: {

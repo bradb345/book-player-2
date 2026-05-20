@@ -54,6 +54,15 @@ export interface ListeningSession {
   session_date: string;
 }
 
+export interface Note {
+  id: number;
+  book_history_id: number;
+  text: string;
+  position_ms: number | null;
+  chapter_title: string | null;
+  created_at: string;
+}
+
 let db: SQLite.SQLiteDatabase | null = null;
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -194,6 +203,19 @@ async function initializeDatabase(database: SQLite.SQLiteDatabase): Promise<void
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_listening_sessions_unique
       ON listening_sessions(book_history_id, session_date);
+
+    CREATE TABLE IF NOT EXISTS notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      book_history_id INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      position_ms INTEGER,
+      chapter_title TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (book_history_id) REFERENCES book_history(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_notes_book_history
+      ON notes(book_history_id, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS app_settings (
       key TEXT PRIMARY KEY,
@@ -861,6 +883,71 @@ export async function getDailyListeningStats(year?: number, month?: number): Pro
     }
     query += ` GROUP BY session_date ORDER BY session_date`;
     return await database.getAllAsync<{ date: string; duration_ms: number }>(query, params);
+  });
+}
+
+// Notes management
+
+export async function insertNote(
+  bookHistoryId: number,
+  text: string,
+  positionMs: number | null,
+  chapterTitle: string | null,
+): Promise<Note> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const result = await database.runAsync(
+      `INSERT INTO notes (book_history_id, text, position_ms, chapter_title)
+       VALUES (?, ?, ?, ?)`,
+      [bookHistoryId, text, positionMs, chapterTitle]
+    );
+    const created = await database.getFirstAsync<Note>(
+      `SELECT * FROM notes WHERE id = ?`,
+      [result.lastInsertRowId]
+    );
+    if (!created) throw new Error("Failed to create note");
+    return created;
+  });
+}
+
+export async function getNotesForBookHistory(bookHistoryId: number): Promise<Note[]> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getAllAsync<Note>(
+      `SELECT * FROM notes WHERE book_history_id = ? ORDER BY created_at DESC`,
+      [bookHistoryId]
+    );
+  });
+}
+
+export async function getRecentNotesForBookHistory(
+  bookHistoryId: number,
+  limit: number,
+): Promise<Note[]> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    return await database.getAllAsync<Note>(
+      `SELECT * FROM notes WHERE book_history_id = ? ORDER BY created_at DESC LIMIT ?`,
+      [bookHistoryId, limit]
+    );
+  });
+}
+
+export async function getNoteCountForBookHistory(bookHistoryId: number): Promise<number> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    const result = await database.getFirstAsync<{ count: number }>(
+      `SELECT COUNT(*) as count FROM notes WHERE book_history_id = ?`,
+      [bookHistoryId]
+    );
+    return result?.count ?? 0;
+  });
+}
+
+export async function deleteNote(noteId: number): Promise<void> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(`DELETE FROM notes WHERE id = ?`, [noteId]);
   });
 }
 
