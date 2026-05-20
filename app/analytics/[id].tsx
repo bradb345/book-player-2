@@ -15,11 +15,14 @@ import { colors } from "@/constants/theme";
 import { sharedStyles } from "@/constants/styles";
 import {
   BookHistory,
+  Note,
   getBookHistoryById,
   getTotalListeningTimeForBook,
   deleteBookHistory,
+  getRecentNotesForBookHistory,
+  getNoteCountForBookHistory,
 } from "@/services/database";
-import { formatDuration, formatDate, daysBetween } from "@/utils/format";
+import { formatDuration, formatDate, formatPlaybackTime, daysBetween } from "@/utils/format";
 import { BookCover } from "@/components/BookCover";
 import { ProgressRing } from "@/components/ProgressRing";
 import { NotFoundScreen } from "@/components/NotFoundScreen";
@@ -36,6 +39,8 @@ export default function BookAnalyticsScreen() {
   const router = useRouter();
   const [book, setBook] = useState<BookHistory | null>(null);
   const [listeningTimeMs, setListeningTimeMs] = useState(0);
+  const [recentNotes, setRecentNotes] = useState<Note[]>([]);
+  const [noteCount, setNoteCount] = useState(0);
 
   useFocusEffect(
     useCallback(() => {
@@ -44,8 +49,14 @@ export default function BookAnalyticsScreen() {
         const bh = await getBookHistoryById(parseInt(id));
         setBook(bh);
         if (bh) {
-          const time = await getTotalListeningTimeForBook(bh.id);
+          const [time, notes, count] = await Promise.all([
+            getTotalListeningTimeForBook(bh.id),
+            getRecentNotesForBookHistory(bh.id, 3),
+            getNoteCountForBookHistory(bh.id),
+          ]);
           setListeningTimeMs(time);
+          setRecentNotes(notes);
+          setNoteCount(count);
         }
       };
       load();
@@ -170,6 +181,49 @@ export default function BookAnalyticsScreen() {
           ))}
         </View>
 
+        {/* Notes */}
+        <Pressable
+          style={styles.notesCard}
+          onPress={() => router.push(`/notes/${book.id}`)}
+        >
+          <View style={styles.notesHeader}>
+            <Text style={styles.notesTitle}>Notes</Text>
+            <View style={styles.notesCountPill}>
+              <Text style={styles.notesCountText}>{noteCount}</Text>
+            </View>
+          </View>
+
+          {recentNotes.length === 0 ? (
+            <Text style={styles.notesEmpty}>
+              Tap to add your first note for this book.
+            </Text>
+          ) : (
+            <View>
+              {recentNotes.map((note, i) => (
+                <View
+                  key={note.id}
+                  style={[
+                    styles.noteRow,
+                    i < recentNotes.length - 1 && styles.noteRowDivider,
+                  ]}
+                >
+                  <Text style={styles.noteRowTime}>
+                    {note.position_ms != null ? formatPlaybackTime(note.position_ms) : "—"}
+                  </Text>
+                  <Text style={styles.noteRowText} numberOfLines={2}>
+                    {note.text}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          <View style={styles.notesCta}>
+            <Text style={styles.notesCtaText}>Open notes</Text>
+            <Ionicons name="chevron-forward" size={14} color={colors.red} />
+          </View>
+        </Pressable>
+
         {!book.is_in_library && (
           <Pressable style={styles.removeButton} onPress={handleRemoveFromHistory}>
             <Ionicons name="trash-outline" size={18} color={colors.red} />
@@ -255,6 +309,80 @@ const styles = StyleSheet.create({
   },
   statValueGreen: {
     color: colors.green,
+  },
+  notesCard: {
+    backgroundColor: colors.mediumGrey,
+    borderRadius: 16,
+    padding: 14,
+    marginTop: 16,
+  },
+  notesHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  notesTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: colors.white,
+  },
+  notesCountPill: {
+    backgroundColor: "rgba(230, 57, 70, 0.18)",
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    minWidth: 22,
+    alignItems: "center",
+  },
+  notesCountText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: colors.red,
+  },
+  notesEmpty: {
+    fontSize: 13,
+    color: colors.lightGrey,
+    paddingVertical: 4,
+  },
+  noteRow: {
+    flexDirection: "row",
+    gap: 10,
+    paddingVertical: 8,
+    alignItems: "flex-start",
+  },
+  noteRowDivider: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "rgba(255,255,255,0.08)",
+  },
+  noteRowTime: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: colors.red,
+    minWidth: 44,
+    paddingTop: 1,
+    fontVariant: ["tabular-nums"],
+  },
+  noteRowText: {
+    flex: 1,
+    fontSize: 13,
+    color: colors.white,
+    lineHeight: 18,
+  },
+  notesCta: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: 2,
+    paddingTop: 10,
+    marginTop: 2,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(255,255,255,0.08)",
+  },
+  notesCtaText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: colors.red,
   },
   removeButton: {
     flexDirection: "row",
