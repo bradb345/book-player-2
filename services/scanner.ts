@@ -44,6 +44,11 @@ interface ImportResult {
 interface PickResult {
   folderUri: string;
   folderName: string;
+  // iOS only: opaque base64 NSData bookmark from the picker. Persisting it
+  // lets syncLibrary re-acquire the security-scoped URL on later launches so
+  // newly-added books in the source folder get imported. Null when the picker
+  // could not produce a bookmark (the initial pick still works in-session).
+  bookmark: string | null;
 }
 
 // A non-recoverable import condition that must abort the ENTIRE scan, not
@@ -257,7 +262,9 @@ export async function pickAudiobooksFolder(): Promise<PickResult | null> {
       const folderUri = permissions.directoryUri;
       const folderName = getFolderName(decodeURIComponent(folderUri));
 
-      return { folderUri, folderName };
+      // Android SAF grants are persistent through the URI itself — no
+      // bookmark needed.
+      return { folderUri, folderName, bookmark: null };
     }
 
     // iOS: real directory picker (UIDocumentPickerViewController for opening
@@ -286,16 +293,24 @@ export async function pickAudiobooksFolder(): Promise<PickResult | null> {
         requestLongTermAccess: true,
       });
 
-      if ("bookmarkStatus" in result && result.bookmarkStatus === "error") {
-        // No long-term bookmark, but the transient scope from the pick is
-        // still active — enough for the immediate scan-and-copy below.
-        console.warn("pickDirectory bookmark error:", result.bookmarkError);
+      let bookmark: string | null = null;
+      if ("bookmarkStatus" in result) {
+        if (result.bookmarkStatus === "success") {
+          bookmark = result.bookmark;
+        } else {
+          // No long-term bookmark, but the transient scope from the pick is
+          // still active for this process — the immediate scan-and-copy below
+          // and any same-session rescans will still work. The source just
+          // can't be reopened after the app is restarted (the user will need
+          // to re-pick the folder).
+          console.warn("pickDirectory bookmark error:", result.bookmarkError);
+        }
       }
 
       const folderUri = result.uri;
       const folderName = getFolderName(decodeURIComponent(folderUri));
 
-      return { folderUri, folderName };
+      return { folderUri, folderName, bookmark };
     } catch (error) {
       if (
         picker.isErrorWithCode(error) &&
@@ -861,6 +876,60 @@ export async function collectSAFBookFiles(
 }
 
 export { getChapterTitleFromFilename };
+
+// Sync helper (iOS): list every top-level book that currently exists under a
+// local picked folder, in the exact `folder_path` form the import path writes
+// to books.folder_path. Lets sync diff this against the DB to find books whose
+// source was deleted.
+//
+// Subdirectory book: `folder_path = joinUri(folderUri, item)` — percent-encoded,
+//   matches importBookFromLocalDirectory.
+// Loose-file book:   `folder_path = "${folderUri.replace(/\/+$/,'')}/${item}"`
+//   — NOT percent-encoded, matches importSingleFile.
+//
+// Returns null (NOT an empty set) when the folder can't be listed — caller
+// must skip the deletion pass in that case, because treating "unreadable" as
+// "empty" would mark every book under this source as missing and wipe them.
+// Caller must already hold any security scope needed to read the folder.
+export async function collectLocalBookFolderPaths(
+  folderUri: string,
+): Promise<Set<string> | null> {
+  let dirInfo;
+  try {
+    dirInfo = await FileSystem.getInfoAsync(folderUri);
+  } catch {
+    return null;
+  }
+  if (!dirInfo.exists || !dirInfo.isDirectory) {
+    return null;
+  }
+
+  let contents: string[];
+  try {
+    contents = await FileSystem.readDirectoryAsync(folderUri);
+  } catch {
+    return null;
+  }
+
+  const expected = new Set<string>();
+  const trimmedFolderUri = folderUri.replace(/\/+$/, "");
+
+  for (const item of contents) {
+    const itemUri = joinUri(folderUri, item);
+    let itemInfo;
+    try {
+      itemInfo = await FileSystem.getInfoAsync(itemUri);
+    } catch {
+      continue;
+    }
+    if (itemInfo.isDirectory) {
+      expected.add(itemUri);
+    } else if (isAudioFile(item)) {
+      expected.add(`${trimmedFolderUri}/${item}`);
+    }
+  }
+  return expected;
+}
 
 async function importBookFromSAFDirectory(directoryUri: string): Promise<boolean> {
   try {
