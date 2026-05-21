@@ -12,9 +12,10 @@ import Foundation
 // dictionary is required: stopAccessingSecurityScopedResource must be called
 // on the same NSURL instance that started it.
 //
-// Bookmark resolution itself is cheap and synchronous; we do it on a background
-// queue anyway because we're an AsyncFunction and don't want to risk blocking
-// the JS thread.
+// Bookmark resolution itself is cheap and synchronous and runs on whichever
+// thread ExpoModulesCore dispatches the AsyncFunction onto (off the JS thread).
+// The serial `queue` below is only used to guard `activeScopes` against
+// concurrent resolve/release calls — it does NOT move bookmark resolution.
 
 public class FolderBookmarkModule: Module {
   private let queue = DispatchQueue(label: "folder-bookmark.scope", qos: .userInitiated)

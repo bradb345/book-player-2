@@ -299,8 +299,10 @@ export async function pickAudiobooksFolder(): Promise<PickResult | null> {
           bookmark = result.bookmark;
         } else {
           // No long-term bookmark, but the transient scope from the pick is
-          // still active — enough for the immediate scan-and-copy below.
-          // Future sync passes won't be able to re-scan this source.
+          // still active for this process — the immediate scan-and-copy below
+          // and any same-session rescans will still work. The source just
+          // can't be reopened after the app is restarted (the user will need
+          // to re-pick the folder).
           console.warn("pickDirectory bookmark error:", result.bookmarkError);
         }
       }
