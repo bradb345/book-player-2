@@ -1,0 +1,7 @@
+{
+  "name": "folder-bookmark",
+  "version": "0.1.0",
+  "description": "Local Expo module: resolve iOS security-scoped bookmarks for picked folders",
+  "main": "index.ts",
+  "private": true
+}

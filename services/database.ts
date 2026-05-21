@@ -32,6 +32,11 @@ export interface FolderSource {
   id: number;
   uri: string;
   name: string;
+  // iOS only: base64-encoded NSData bookmark from the picker. Lets us
+  // re-acquire the security-scoped URL on later launches so syncLibrary can
+  // re-scan the source folder for newly added books. Null on Android (SAF
+  // permissions are persistent through the URI itself).
+  bookmark: string | null;
   created_at: string;
 }
 
@@ -240,6 +245,18 @@ async function initializeDatabase(database: SQLite.SQLiteDatabase): Promise<void
   if (!bookColumns.some((c) => c.name === "is_active")) {
     await database.execAsync(
       `ALTER TABLE books ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`
+    );
+  }
+
+  // Migration: folder_sources.bookmark. iOS-only opaque base64 bookmark
+  // returned by the directory picker; lets sync re-acquire the
+  // security-scoped folder URL on later launches.
+  const folderColumns = await database.getAllAsync<{ name: string }>(
+    `PRAGMA table_info(folder_sources)`
+  );
+  if (!folderColumns.some((c) => c.name === "bookmark")) {
+    await database.execAsync(
+      `ALTER TABLE folder_sources ADD COLUMN bookmark TEXT`
     );
   }
 }
@@ -656,14 +673,33 @@ export async function bookExistsAtPath(folderPath: string): Promise<boolean> {
 }
 
 // Folder source management
-export async function addFolderSource(uri: string, name: string): Promise<number> {
+export async function addFolderSource(
+  uri: string,
+  name: string,
+  bookmark?: string | null
+): Promise<number> {
   return withRetry(async () => {
     const database = await getDatabase();
     const result = await database.runAsync(
-      `INSERT OR IGNORE INTO folder_sources (uri, name) VALUES (?, ?)`,
-      [uri, name]
+      `INSERT OR IGNORE INTO folder_sources (uri, name, bookmark) VALUES (?, ?, ?)`,
+      [uri, name, bookmark ?? null]
     );
     return result.lastInsertRowId;
+  });
+}
+
+// Update the bookmark for an existing folder source. Used when a user re-picks
+// a folder that's already in the DB to refresh stale credentials.
+export async function updateFolderSourceBookmark(
+  uri: string,
+  bookmark: string | null
+): Promise<void> {
+  return withRetry(async () => {
+    const database = await getDatabase();
+    await database.runAsync(
+      `UPDATE folder_sources SET bookmark = ? WHERE uri = ?`,
+      [bookmark, uri]
+    );
   });
 }
 

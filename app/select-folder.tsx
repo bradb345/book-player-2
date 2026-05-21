@@ -20,6 +20,7 @@ import {
   addFolderSource,
   removeFolderSource,
   folderSourceExists,
+  updateFolderSourceBookmark,
   FolderSource,
 } from "@/services/database";
 
@@ -64,13 +65,20 @@ export default function SelectFolderScreen() {
       // Check if folder is already added
       const exists = await folderSourceExists(pickResult.folderUri);
       if (exists) {
+        // Re-picking refreshes the bookmark (the user may be fixing a stale
+        // one so sync can resume) but doesn't re-scan — the books are
+        // already imported.
+        if (pickResult.bookmark) {
+          await updateFolderSourceBookmark(pickResult.folderUri, pickResult.bookmark);
+          await loadFolderSources();
+        }
         setStatus("This folder is already added");
         setIsLoading(false);
         return;
       }
 
       // Add folder source to database
-      await addFolderSource(pickResult.folderUri, pickResult.folderName);
+      await addFolderSource(pickResult.folderUri, pickResult.folderName, pickResult.bookmark);
       await loadFolderSources();
 
       // Scan the folder for audiobooks
