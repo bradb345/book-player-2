@@ -74,47 +74,70 @@ async function repairBookTitles(): Promise<number> {
 
 // Resolve a folder source to a URI that's readable in this process, and a
 // release function. Android SAF sources are persistent through their URI; iOS
-// sources try to acquire the security scope from the stored bookmark.
+// sources need a stored bookmark to re-acquire the security scope after a
+// process restart.
 //
-// iOS without a stored bookmark (e.g. sources added before bookmark capture
-// shipped, or where the picker couldn't issue one) still falls through to a
-// scan attempt: the picker's transient process-scoped grant may still cover
-// the URL — and crucially, this is exactly what the "Rescan" button on the
-// folder-sources page does, so behavior matches user expectation. If access
-// is actually gone the scan no-ops; it never crashes.
+// Returns null on iOS when no scope can be acquired (no bookmark stored, or
+// resolveBookmark failed). The caller must skip the source in that case —
+// attempting expo-file-system reads without a held scope fails with
+// "is not readable" and pollutes the logs. The user can refresh access by
+// re-picking the folder from the sources screen.
 async function openFolderSource(
   source: FolderSource
-): Promise<{ uri: string; release: () => Promise<void> }> {
+): Promise<{ uri: string; release: () => Promise<void> } | null> {
   if (source.uri.startsWith("content://")) {
     return { uri: source.uri, release: async () => {} };
   }
 
-  if (source.bookmark && isFolderBookmarkSupported) {
-    const resolved = await resolveBookmark(source.bookmark);
-    if (resolved) {
-      if (resolved.stale) {
-        // Still resolves this session, but iOS is telling us the user should
-        // re-pick the folder eventually to refresh the bookmark.
-        console.warn(
-          `Sync: bookmark stale for "${source.name}" — re-pick the folder to refresh access.`
-        );
-      }
-      return {
-        // Scan with the *original* picker URI so folder_path comparisons stay
-        // byte-equal against books imported on first pick (bookExistsAtPath).
-        // The scope acquired on the resolved URL covers the same filesystem
-        // path, so expo-file-system reads succeed.
-        uri: source.uri,
-        release: async () => {
-          await releaseBookmark(resolved.uri);
-        },
-      };
-    }
+  if (!source.bookmark) {
+    console.warn(
+      `Sync: skipping "${source.name}" — no bookmark stored. Re-pick the ` +
+        `folder from the sources screen to refresh access.`
+    );
+    return null;
   }
 
-  // No bookmark (or resolution failed). Best-effort scan with whatever
-  // transient scope the process already holds.
-  return { uri: source.uri, release: async () => {} };
+  if (!isFolderBookmarkSupported) {
+    console.warn(
+      `Sync: skipping "${source.name}" — FolderBookmark native module not ` +
+        `loaded. Rebuild the dev client (npx expo run:ios).`
+    );
+    return null;
+  }
+
+  const resolved = await resolveBookmark(source.bookmark);
+  if (!resolved) {
+    console.warn(
+      `Sync: skipping "${source.name}" — resolveBookmark returned null. ` +
+        `Re-pick the folder to refresh the bookmark.`
+    );
+    return null;
+  }
+
+  if (resolved.stale) {
+    // Still resolves this session, but iOS is telling us the user should
+    // re-pick the folder eventually to refresh the bookmark.
+    console.warn(
+      `Sync: bookmark stale for "${source.name}" — re-pick the folder to refresh access.`
+    );
+  }
+
+  return {
+    // Scan with the bookmark-resolved URL — iOS security scopes are bound to
+    // the specific NSURL instance that called
+    // startAccessingSecurityScopedResource, not the underlying path, so
+    // reading source.uri (even when it points at the same file) fails with
+    // "is not readable". A side-effect: any book whose folder_path was
+    // recorded against source.uri won't be picked up by the prefix filter
+    // below, so the deletion pass skips it — that's intentional and safe;
+    // it only means orphan cleanup waits until those rows get re-imported
+    // against the resolved URI. New imports use the resolved URI going
+    // forward.
+    uri: resolved.uri,
+    release: async () => {
+      await releaseBookmark(resolved.uri);
+    },
+  };
 }
 
 export async function syncLibrary(): Promise<SyncResult> {
@@ -156,6 +179,7 @@ export async function syncLibrary(): Promise<SyncResult> {
   const allBooks = await getBooksForSync();
   for (const source of iosSources) {
     const opened = await openFolderSource(source);
+    if (!opened) continue;
     try {
       const sourcePrefix = opened.uri.replace(/\/+$/, "") + "/";
       // null = folder unreadable; SKIP deletion (treating that as "empty"
